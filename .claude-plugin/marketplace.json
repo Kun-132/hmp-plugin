@@ -1,0 +1,6 @@
+{
+  "name": "hmp-marketplace",
+  "description": "HMP のローカルクライアント用マーケットプレイス",
+  "owner": { "name": "Kun-132" },
+  "plugins": [{ "name": "hmp", "source": "./plugins/hmp", "description": "HMP のローカルクライアント" }]
+}
