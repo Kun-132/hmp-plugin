@@ -1,9 +1,11 @@
 import { CLIENT_VERSION } from './config.mjs';
 
-export async function request(config, token, path, { body, deadline = Date.now() + 750 } = {}) {
+// Hooks keep the 750 ms cap so a slow network never delays the session; manual commands wait longer.
+export const manual = () => ({ deadline: Date.now() + 8000, timeout: 8000 });
+export async function request(config, token, path, { body, deadline = Date.now() + 750, timeout = 750 } = {}) {
   if (!token || deadline <= Date.now()) throw Error('unavailable');
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), Math.min(750, deadline - Date.now()));
+  const timer = setTimeout(() => controller.abort(), Math.min(timeout, deadline - Date.now()));
   try {
     const response = await fetch(config.instance_url + path, {
       method: body ? 'POST' : 'GET', redirect: 'error', signal: controller.signal,
