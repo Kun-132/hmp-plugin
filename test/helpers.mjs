@@ -11,7 +11,8 @@ export async function fixture(t, { remote = {}, fail = false, noToken = false, c
   const bin = join(home, 'mock-bin'), project = join(home, 'project');
   await mkdir(bin); await mkdir(project); await mkdir(join(home, '.hmp'), { mode: 0o700 });
   const requests = [], seen = new Set();
-  const state = { fail, remote, hang: false, receipt: null };
+  const state = { fail, remote, hang: false, receipt: null, delayMs: 0 };
+  const pause = () => new Promise(resolve => setTimeout(resolve, state.delayMs));
   const respond = (method, url, raw) => {
     requests.push({ method, url, body: raw ? JSON.parse(raw) : null });
     if (state.hang) return null;
@@ -27,6 +28,7 @@ export async function fixture(t, { remote = {}, fail = false, noToken = false, c
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const raw = Buffer.concat(chunks).toString('utf8');
+    await pause();
     const result = respond(req.method, req.url, raw);
     if (result) { res.writeHead(result.status, { 'Content-Type': 'application/json' }); res.end(result.body); }
   });
@@ -54,8 +56,9 @@ export async function fixture(t, { remote = {}, fail = false, noToken = false, c
     ...(ipc ? { NODE_OPTIONS: `--import=${resolve('test/ipc-fetch.mjs')}` } : {}) };
   const run = (file, args = [], input = '', options = {}) => new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [join(scripts, file), ...args], { cwd: project, env, ...options, stdio: ['pipe', 'pipe', 'pipe', ...(ipc ? ['ipc'] : [])] });
-    if (ipc) child.on('message', message => {
+    if (ipc) child.on('message', async message => {
       if (message.type !== 'test_http') return;
+      await pause();
       const result = respond(message.method, new URL(message.url).pathname, message.body);
       if (result && child.connected) child.send({ id: message.id, ...result });
     });
