@@ -94,3 +94,13 @@ test('onboard rechecks source exclusion after approval preview and never queues 
   assert.equal((await f.run('onboard.mjs', ['send', plan.plan, String(plan.count), '--approved'])).code, 1);
   assert.equal(f.requests.length, 0); assert.equal((await f.names('spool')).length, 0);
 });
+test('manual verify waits for a slow server; hook requests keep their short cap', async t => {
+  const f = await fixture(t, { remote: { instance_label: '合成テスト用 HMP' } });
+  f.state.delayMs = 1500;
+  const started = Date.now();
+  const verified = await f.run('manage.mjs', ['verify']);
+  assert.equal(verified.code, 0); assert.equal(JSON.parse(verified.stdout).connected, true);
+  assert.ok(Date.now() - started >= 1500);
+  const { request } = await import('../plugins/hmp/scripts/client.mjs');
+  await assert.rejects(request({ instance_url: f.url }, 'synthetic-token', '/api/client/config'));
+});

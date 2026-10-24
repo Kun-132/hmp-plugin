@@ -2,7 +2,7 @@ import { isOffrecord } from './offrecord.mjs';
 import { pathToFileURL } from 'node:url';
 import { loadConfig, loadToken, validateConfig, validateMcp, CLIENT_VERSION } from './config.mjs';
 import { readJSON, writeJSON, pathFor, filesIn } from './state.mjs';
-import { request } from './client.mjs';
+import { manual, request } from './client.mjs';
 import { redact } from './events.mjs';
 
 export async function changeFiles(changes) {
@@ -58,7 +58,7 @@ export async function manage(args) {
   }
   if (command === 'verify') {
     const config = await loadConfig(), token = await loadToken(config.device);
-    const remote = await request(config, token, '/api/client/config');
+    const remote = await request(config, token, '/api/client/config', manual());
     const label = typeof remote.instance_label === 'string' ? remote.instance_label : '';
     return { instance_label: redact(label.split(token).join('<SECRET>')).replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, 80), connected: true };
   }
@@ -67,7 +67,7 @@ export async function manage(args) {
     const last = await readJSON(pathFor('last-send.json')).catch(e => { if (e.code === 'ENOENT') return null; throw e; });
     let pending = null;
     const config = await loadConfig(), token = await loadToken(config.device);
-    try { pending = (await import('./client.mjs')).serverSummary(await request(config, token, '/api/client/config')).pending; } catch {}
+    try { pending = (await import('./client.mjs')).serverSummary(await request(config, token, '/api/client/config', manual())).pending; } catch {}
     return { client_version: CLIENT_VERSION, spool: (await filesIn('spool')).filter(x => /^[a-f0-9]{64}\.json$/.test(x)).length,
       last_send: last?.sent_at ?? null, pending };
   }
