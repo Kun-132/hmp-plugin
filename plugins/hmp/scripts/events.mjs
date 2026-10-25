@@ -26,14 +26,25 @@ export function makeEvent(input, kind) {
   return { client_event_id: `hmp_${hash(JSON.stringify([hash(session), turn, kind]))}`, kind, session, turn,
     occurred_at: new Date(input.occurred_at ?? Date.now()).toISOString(), text };
 }
-const filename = event => hash(event.client_event_id) + '.json';
-export async function enqueue(event) {
+export const spoolFilename = event => hash(JSON.stringify([event.instance_origin, event.client_event_id])) + '.json';
+export async function enqueue(value, config) {
+  const event = { ...value, instance_origin: config.instance_url };
   if (await isOffrecord(event.session)) return;
-  try { await readJSON(join(pathFor('sent'), filename(event))); return; }
+  try { await readJSON(join(pathFor('sent'), spoolFilename(event))); return; }
   catch (e) { if (e.code !== 'ENOENT') throw e; }
-  try { await publishJSON(join(pathFor('spool'), filename(event)), event); }
+  try { await publishJSON(join(pathFor('spool'), spoolFilename(event)), event); }
   catch (e) { if (e.code !== 'EEXIST') throw e; }
-  if (await isOffrecord(event.session)) await remove(join(pathFor('spool'), filename(event)));
+  if (await isOffrecord(event.session)) await remove(join(pathFor('spool'), spoolFilename(event)));
+}
+export async function spoolStatus(config) {
+  let spool = 0, spool_held = 0;
+  for (const name of await filesIn('spool')) {
+    if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+    spool++;
+    const entry = await readJSON(join(pathFor('spool'), name)).catch(() => null);
+    if (entry?.instance_origin !== config.instance_url) spool_held++;
+  }
+  return { spool, spool_held };
 }
 export async function flush(config, token, { deadline = Date.now() + 2400, max = 200 } = {}) {
   if (!token) return;
@@ -42,9 +53,9 @@ export async function flush(config, token, { deadline = Date.now() + 2400, max =
     if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
     try {
       const event = await readJSON(join(pathFor('spool'), name));
-      const keys = ['client_event_id', 'kind', 'session', 'turn', 'occurred_at', 'text'];
+      const keys = ['client_event_id', 'kind', 'session', 'turn', 'occurred_at', 'text', 'instance_origin'];
       if (!event || Object.keys(event).some(key => !keys.includes(key)) ||
-          filename(event) !== name || !['prompt', 'response'].includes(event.kind) || typeof event.text !== 'string' ||
+          event.instance_origin !== config.instance_url || spoolFilename(event) !== name || !['prompt', 'response'].includes(event.kind) || typeof event.text !== 'string' ||
           typeof event.session !== 'string' || !event.session || !/^[a-f0-9]{64}$/.test(event.turn) ||
           event.client_event_id !== `hmp_${hash(JSON.stringify([hash(event.session), event.turn, event.kind]))}` ||
           typeof event.occurred_at !== 'string' || new Date(event.occurred_at).toISOString() !== event.occurred_at ||
@@ -65,7 +76,7 @@ export async function flush(config, token, { deadline = Date.now() + 2400, max =
     }
     if (!batch.length) continue;
     const receipt = await request(config, token, '/api/client/events', {
-      body: { client_version: CLIENT_VERSION, device: config.device, events: batch.map(x => x.event) }, deadline,
+      body: { client_version: CLIENT_VERSION, device: config.device, events: batch.map(({ event: { instance_origin, ...event } }) => event) }, deadline,
     });
     // Partial/ambiguous acknowledgements stay on disk; server idempotency makes replay safe.
     if (!Array.isArray(receipt.rejected) || receipt.rejected.length || !Number.isSafeInteger(receipt.accepted) ||

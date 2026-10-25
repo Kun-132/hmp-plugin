@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { readFile, stat, writeFile, mkdtemp, symlink, rm, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fixture } from './helpers.mjs';
-import { TOOLS, MAXIMUM, effectiveLimits, claudeArgs, createStreamGuard, runClaude, supportedVersion } from '../plugins/hmp/scripts/worker.mjs';
+import { fixture, successfulClaude, workerInit, workerSuccess } from './helpers.mjs';
+import { TOOLS, MAXIMUM, effectiveLimits, claudeArgs, createStreamGuard, runClaude, supportedVersion, connectedWorker } from '../plugins/hmp/scripts/worker.mjs';
 
 const launchLog = `const fs = require('node:fs'); const p = require('node:path');
 fs.appendFileSync(p.join(process.env.HOME, 'launches.jsonl'), JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2),
-  credential: Object.hasOwn(process.env, 'HMP_CLIENT_TOKEN'), extra: Object.hasOwn(process.env, 'UNTRUSTED_PROVIDER_OVERRIDE') }) + '\\n');`;
+  credential: Object.hasOwn(process.env, 'HMP_CLIENT_TOKEN'), extra: Object.hasOwn(process.env, 'UNTRUSTED_PROVIDER_OVERRIDE') }) + '\\n');
+${successfulClaude}`;
 const readLaunches = async f => (await readFile(join(f.home, 'launches.jsonl'), 'utf8').catch(e => { if (e.code === 'ENOENT') return ''; throw e; }))
   .trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
 async function ready(f, limits = {}) { await f.write('server-config.json', { pending: { extraction: 30, lines: 30 }, limits }); }
@@ -24,6 +25,21 @@ test('tool list is immutable and CLI isolation cannot be extended by config', ()
   assert.equal(settings.disableAllHooks, true); assert.equal(settings.permissions.blockReadsOutsideWorkingDirectories, true);
   assert.deepEqual(args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--permission-mode')),
     [...TOOLS, 'Read(//tmp/synthetic-run/**)']);
+});
+test('readiness requires authenticated hmp and every fixed worker tool', () => {
+  assert.equal(connectedWorker(workerInit), true);
+  for (const event of [
+    { ...workerInit, mcp_servers: [{ name: 'hmp', status: 'needs-auth' }] },
+    { ...workerInit, mcp_servers: [{ name: 'other', status: 'connected' }] },
+    { ...workerInit, tools: workerInit.tools.slice(1) },
+    { ...workerInit, mcp_server_errors: [{ name: 'hmp' }] },
+    { type: 'result', subtype: 'success' },
+  ]) assert.equal(Boolean(connectedWorker(event)), false);
+  const args = claudeArgs('/tmp/synthetic-run', { verify: true });
+  assert.equal(args[args.indexOf('--tools') + 1], '');
+  assert.equal(args.includes('--allowedTools'), false);
+  assert.equal(args[args.indexOf('--permission-mode') + 1], 'dontAsk');
+  assert.deepEqual(JSON.parse(args[args.indexOf('--settings') + 1]).permissions.ask, ['mcp__*']);
 });
 test('limits are min(hard maximum, config); invalid and zero cannot enable work', () => {
   assert.deepEqual(MAXIMUM, { max_runs_per_day: 24, max_items_per_run: 8, max_minutes: 20 });
@@ -92,6 +108,19 @@ test('daily and lower item limits hold, zero prevents launch', async t => {
   await ready(f); await f.run('worker.mjs'); assert.equal((await readLaunches(f)).length, 2);
   await f.write('worker-usage.json', { day: new Date(0).toISOString().slice(0, 10), runs: 24 });
   await ready(f, { max_items_per_run: 0 }); await f.run('worker.mjs'); assert.equal((await readLaunches(f)).length, 2);
+});
+test('missing OAuth or incomplete headless results stop the queue, even with exit zero', async t => {
+  for (const events of [
+    [{ ...workerInit, mcp_servers: [{ name: 'hmp', status: 'needs-auth' }] }, workerSuccess],
+    [workerInit], [workerSuccess],
+    [workerInit, { ...workerSuccess, is_error: true }],
+  ]) {
+    const f = await fixture(t);
+    // A zero exit cannot substitute for the connection and completion events of this run.
+    await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\nif(process.argv.includes('--version')){process.stdout.write('2.1.310');process.exit(0);}\n${launchLog.replace(successfulClaude, '')}\nprocess.stdout.write(${JSON.stringify(events.map(x => JSON.stringify(x)).join('\n') + '\n')});`, { mode: 0o700 });
+    await ready(f); await f.run('worker.mjs');
+    assert.equal((await readLaunches(f)).length, 1);
+  }
 });
 test('an old CLI is refused before any work or daily allowance is consumed', async t => {
   const f = await fixture(t, { claude: launchLog }); await ready(f);

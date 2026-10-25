@@ -10,7 +10,7 @@ export async function forget(args) {
   if (option === '--resume') return setOffrecord(session, false);
   if (!option) return setOffrecord(session, true);
   if (!await isOffrecord(session)) throw Error('offrecord_required');
-  const config = await loadConfig(), token = await loadToken(config.device);
+  const config = await loadConfig(), token = await loadToken(config);
   return request(config, token, '/api/client/forget', { body: {
     client_version: CLIENT_VERSION, device: config.device, session, scope: 'session',
     ...(option === '--preview' ? { dry_run: true } : {}),

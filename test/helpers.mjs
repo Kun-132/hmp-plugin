@@ -3,8 +3,13 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 
 export const scripts = resolve('plugins/hmp/scripts');
+export const workerInit = { type: 'system', subtype: 'init', mcp_servers: [{ name: 'hmp', status: 'connected' }],
+  tools: ['mcp__hmp__claim_extraction', 'mcp__hmp__submit_extraction', 'mcp__hmp__submit_purpose_links', 'mcp__hmp__claim_line_job', 'mcp__hmp__submit_line_blocks'] };
+export const workerSuccess = { type: 'result', subtype: 'success', is_error: false, result: 'OK' };
+export const successfulClaude = `process.stdout.write(${JSON.stringify(JSON.stringify(workerInit) + '\n' + JSON.stringify(workerSuccess) + '\n')});`;
 let reportedFallback = false;
 export async function fixture(t, { remote = {}, fail = false, noToken = false, claude = '' } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'hmp-test-'));
@@ -13,8 +18,8 @@ export async function fixture(t, { remote = {}, fail = false, noToken = false, c
   const requests = [], seen = new Set();
   const state = { fail, remote, hang: false, receipt: null, delayMs: 0 };
   const pause = () => new Promise(resolve => setTimeout(resolve, state.delayMs));
-  const respond = (method, url, raw) => {
-    requests.push({ method, url, body: raw ? JSON.parse(raw) : null });
+  const respond = (method, url, raw, headers = {}) => {
+    requests.push({ method, url, body: raw ? JSON.parse(raw) : null, authorization: headers.Authorization ?? headers.authorization ?? null });
     if (state.hang) return null;
     if (state.fail) return { status: 503, body: '{}' };
     if (url === '/api/client/forget') return { status: 200, body: JSON.stringify({ forgotten: { captures: 2, facts: 1, blocks: 1 }, retained_notice: 'Synthetic retained notice' }) };
@@ -29,7 +34,7 @@ export async function fixture(t, { remote = {}, fail = false, noToken = false, c
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const raw = Buffer.concat(chunks).toString('utf8');
     await pause();
-    const result = respond(req.method, req.url, raw);
+    const result = respond(req.method, req.url, raw, req.headers);
     if (result) { res.writeHead(result.status, { 'Content-Type': 'application/json' }); res.end(result.body); }
   });
   t.after(async () => { server.closeAllConnections(); if (server.listening) await new Promise(resolve => server.close(resolve)); await rm(home, { recursive: true, force: true }); });
@@ -48,18 +53,36 @@ export async function fixture(t, { remote = {}, fail = false, noToken = false, c
   const url = `http://127.0.0.1:${ipc ? 12345 : server.address().port}`;
   await writeFile(join(home, '.hmp/config.json'), JSON.stringify({ instance_url: url, device: 'synthetic-device' }), { mode: 0o600 });
   await writeFile(join(home, '.hmp/mcp.json'), JSON.stringify({ mcpServers: { hmp: { type: 'http', url: url + '/mcp' } } }), { mode: 0o600 });
-  const security = noToken ? 'process.exit(1);' : "process.stdout.write(['synthetic','test','credential'].join('-'));";
-  await writeFile(join(bin, 'security'), `#!${process.execPath}\n${security}\n`, { mode: 0o700 });
-  await writeFile(join(bin, 'claude'), `#!${process.execPath}\nif(process.argv.includes('--version')){process.stdout.write('2.1.309 (mock)');process.exit(0);}\n${claude || 'process.exit(0);'}\n`, { mode: 0o700 });
+  const account = 'synthetic-device@127.0.0.1';
+  await mkdir(join(home, '.hmp/credential-origins'), { mode: 0o700 });
+  await writeFile(join(home, '.hmp/credential-origins', createHash('sha256').update(account).digest('hex') + '.json'),
+    JSON.stringify({ account, origin: url }), { mode: 0o600 });
+  const quote = text => "'" + text.replaceAll("'", "'\\''") + "'";
+  const setCredentials = async entries => {
+    await writeFile(join(home, 'mock-keychain.json'), JSON.stringify(entries), { mode: 0o600 });
+    await writeFile(join(bin, 'security'), `#!/bin/sh
+account=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '-a' ]; then shift; account="$1"; fi
+  shift
+done
+case "$account" in
+${Object.entries(entries).map(([key, token]) => `${quote(key)}) printf '%s' ${quote(token)} ;;`).join('\n')}
+*) exit 1 ;;
+esac
+`, { mode: 0o700 });
+  };
+  await setCredentials(noToken ? {} : { [account]: 'synthetic-test-credential' });
+  await writeFile(join(bin, 'claude'), `#!${process.execPath}\nif(process.argv.includes('--version')){process.stdout.write('2.1.309 (mock)');process.exit(0);}\n${claude || successfulClaude}\n`, { mode: 0o700 });
   const env = { HOME: home, PATH: `${bin}:/usr/bin:/bin`, LANG: 'C.UTF-8',
-    HMP_CLIENT_TOKEN: noToken ? '' : ['synthetic', 'test', 'credential'].join('-'),
-    ...(ipc ? { NODE_OPTIONS: `--import=${resolve('test/ipc-fetch.mjs')}` } : {}) };
+    HMP_CLIENT_TOKEN: noToken ? '' : ['synthetic', 'test', 'credential'].join('-'), HMP_CLIENT_ORIGIN: url,
+    NODE_OPTIONS: `--import=${resolve('test/security-exec.mjs')} ${ipc ? `--import=${resolve('test/ipc-fetch.mjs')}` : ''}` };
   const run = (file, args = [], input = '', options = {}) => new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [join(scripts, file), ...args], { cwd: project, env, ...options, stdio: ['pipe', 'pipe', 'pipe', ...(ipc ? ['ipc'] : [])] });
     if (ipc) child.on('message', async message => {
       if (message.type !== 'test_http') return;
       await pause();
-      const result = respond(message.method, new URL(message.url).pathname, message.body);
+      const result = respond(message.method, new URL(message.url).pathname, message.body, message.headers);
       if (result && child.connected) child.send({ id: message.id, ...result });
     });
     let stdout = '', stderr = '';
@@ -80,7 +103,7 @@ export async function fixture(t, { remote = {}, fail = false, noToken = false, c
   const hook = (event, input = {}) => run('hook.mjs', [event], { cwd: project, session_id: 'synthetic-session', prompt_id: 'synthetic-turn',
     prompt: '合成の質問', last_assistant_message: '合成の最終回答', ...input });
   const names = async dir => readdir(join(home, '.hmp', dir)).catch(e => { if (e.code === 'ENOENT') return []; throw e; });
-  return { home, bin, project, env, requests, seen, state, url, run, hook, names,
+  return { home, bin, project, env, requests, seen, state, url, run, hook, names, setCredentials,
     read: async file => JSON.parse(await readFile(join(home, '.hmp', file), 'utf8')),
     write: async (file, data) => { await mkdir(join(home, '.hmp', file, '..'), { recursive: true, mode: 0o700 }); await writeFile(join(home, '.hmp', file), JSON.stringify(data), { mode: 0o600 }); } };
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile, stat, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fixture } from './helpers.mjs';
-import { redact, makeEvent, hash } from '../plugins/hmp/scripts/events.mjs';
+import { redact, makeEvent, hash, spoolFilename } from '../plugins/hmp/scripts/events.mjs';
 
 const quiet = result => assert.deepEqual(result, { code: 0, stdout: '', stderr: '' });
 const sessionLine = (session = 'synthetic-session') => `HMP: get_context_packet を呼ぶときは session_id=${session} を渡す`;
@@ -193,9 +193,10 @@ test('SessionStart sends at most 200 in <=50-event batches', async t => {
   // Seed events with the production identity/hash algorithm, without invoking 201 processes.
   for (let i = 0; i < 201; i++) {
     const event = makeEvent({ session_id: 'synthetic', prompt_id: String(i), prompt: '合成', occurred_at: new Date(i * 1000).toISOString() }, 'prompt');
-    await f.write(`spool/${hash(event.client_event_id)}.json`, event);
+    event.instance_origin = f.url;
+    await f.write(`spool/${spoolFilename(event)}`, event);
   }
-  await writeFile(join(f.bin, 'security'), `#!${process.execPath}\nprocess.stdout.write('synthetic');\n`, { mode: 0o700 });
+  await f.setCredentials({ 'synthetic-device@127.0.0.1': 'synthetic' });
   f.env.HMP_CLIENT_TOKEN = 'synthetic';
   sessionContext(await f.hook('SessionStart'));
   const posts = f.requests.filter(r => r.method === 'POST');
