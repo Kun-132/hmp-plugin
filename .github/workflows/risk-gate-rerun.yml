@@ -1,0 +1,50 @@
+name: Risk gate re-run
+# Re-run the original PR's risk-gate job so the required check reads current reviews.
+# This workflow only triggers a re-run; it never checks out or runs PR code.
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+permissions:
+  actions: write
+concurrency:
+  group: risk-gate-rerun-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  rerun:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Re-run the risk-gate job for the PR head commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Send the token on stdin, as in the HMP workflow.
+          api() { printf 'header = "Authorization: Bearer %s"\n' "$GH_TOKEN" | curl -fsSL -K - -H 'Accept: application/vnd.github+json' "$@"; }
+          base="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY"
+          # pull_request_target's run SHA is trusted base code, not the PR head.
+          # Match the trusted run-name instead, including both PR number and head SHA.
+          title="risk-gate PR #$PR_NUMBER @ $HEAD_SHA"
+          # A job can only be re-run after its run finishes.
+          status=
+          for _ in $(seq 1 80); do
+            page=1
+            while :; do
+              runs=$(api "$base/actions/workflows/risk-gate.yml/runs?event=pull_request_target&per_page=100&page=$page")
+              read -r id status < <(printf '%s' "$runs" | jq -r --arg title "$title" \
+                '[.workflow_runs[] | select(.display_title == $title)][0] // {} | "\(.id // "-") \(.status // "-")"')
+              [ "$id" != - ] && break
+              [ "$(printf '%s' "$runs" | jq '.workflow_runs | length')" -lt 100 ] && break
+              page=$((page + 1))
+            done
+            if [ "$id" = - ]; then echo "No risk-gate run for PR #$PR_NUMBER at $HEAD_SHA"; exit 0; fi
+            [ "$status" = completed ] && break
+            sleep 15
+          done
+          [ "$status" = completed ] || { echo "::error::risk-gate run $id did not finish"; exit 1; }
+          job=$(api "$base/actions/runs/$id/jobs?filter=latest&per_page=100" | jq -r '[.jobs[] | select(.name == "risk-gate")][0].id // empty')
+          [ -n "$job" ] || { echo "::error::No risk-gate job in run $id"; exit 1; }
+          echo "Re-running job risk-gate ($job) of run $id"
+          api -X POST "$base/actions/jobs/$job/rerun" > /dev/null
