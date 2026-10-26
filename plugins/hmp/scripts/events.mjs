@@ -68,15 +68,15 @@ export async function flush(config, token, { deadline = Date.now() + 2400, max =
   pending.sort((a, b) => a.event.occurred_at.localeCompare(b.event.occurred_at)
     || a.event.session.localeCompare(b.event.session) || a.event.turn.localeCompare(b.event.turn)
     || (a.event.kind === b.event.kind ? 0 : a.event.kind === 'prompt' ? -1 : 1) || a.name.localeCompare(b.name));
-  for (let i = 0; i < Math.min(max, pending.length) && Date.now() < deadline; i += 50) {
+  for (let i = 0; i < Math.min(max, pending.length) && Date.now() < deadline; i += 20) {
     const batch = [];
-    for (const item of pending.slice(i, Math.min(i + 50, max))) {
+    for (const item of pending.slice(i, Math.min(i + 20, max))) {
       if (await isOffrecord(item.event.session)) await remove(join(pathFor('spool'), item.name));
       else batch.push(item);
     }
     if (!batch.length) continue;
     const receipt = await request(config, token, '/api/client/events', {
-      body: { client_version: CLIENT_VERSION, device: config.device, events: batch.map(({ event: { instance_origin, ...event } }) => event) }, deadline,
+      body: { client_version: CLIENT_VERSION, device: config.device, events: batch.map(({ event: { instance_origin, ...event } }) => event) }, deadline, timeout: deadline - Date.now(),
     });
     // Partial/ambiguous acknowledgements stay on disk; server idempotency makes replay safe.
     if (!Array.isArray(receipt.rejected) || receipt.rejected.length || !Number.isSafeInteger(receipt.accepted) ||

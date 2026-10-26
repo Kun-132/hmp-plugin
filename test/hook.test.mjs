@@ -18,7 +18,7 @@ test('prompt/Stop send only question/final answer, with stable ids and version',
   quiet(await f.hook('UserPromptSubmit', { tool_output: 'SYNTHETIC_TOOL', transcript_path: '/nonexistent' }));
   quiet(await f.hook('Stop', { tool_output: 'SYNTHETIC_TOOL' }));
   const [prompt, response] = f.requests.map(r => r.body);
-  assert.equal(prompt.client_version, '0.1.0'); assert.equal(prompt.device, 'synthetic-device');
+  assert.equal(prompt.client_version, '0.1.1'); assert.equal(prompt.device, 'synthetic-device');
   assert.equal(prompt.events[0].kind, 'prompt'); assert.equal(prompt.events[0].text, '合成の質問');
   assert.equal(response.events[0].kind, 'response'); assert.equal(response.events[0].text, '合成の最終回答');
   assert.equal(prompt.events[0].session, 'synthetic-session');
@@ -188,7 +188,7 @@ test('malformed/oversized input, wrong types, missing fields/config, HTTP timeou
   const started = Date.now(); quiet(await f.hook('UserPromptSubmit'));
   assert.ok(Date.now() - started < 4500);
 });
-test('SessionStart sends at most 200 in <=50-event batches', async t => {
+test('SessionStart sends at most 200 in <=20-event batches', async t => {
   const f = await fixture(t, { noToken: true });
   // Seed events with the production identity/hash algorithm, without invoking 201 processes.
   for (let i = 0; i < 201; i++) {
@@ -200,8 +200,49 @@ test('SessionStart sends at most 200 in <=50-event batches', async t => {
   f.env.HMP_CLIENT_TOKEN = 'synthetic';
   sessionContext(await f.hook('SessionStart'));
   const posts = f.requests.filter(r => r.method === 'POST');
-  assert.equal(posts.length, 4); assert.ok(posts.every(r => r.body.events.length === 50));
+  assert.equal(posts.length, 10); assert.ok(posts.every(r => r.body.events.length === 20));
   assert.equal((await f.names('spool')).length, 1);
   assert.deepEqual(posts.flatMap(r => r.body.events.map(e => e.occurred_at)),
     Array.from({ length: 200 }, (_, i) => new Date(i * 1000).toISOString()));
+});
+test('1500 ms POSTs drain 27 queued events within two bounded hook runs', async t => {
+  const f = await fixture(t), ids = [];
+  for (let i = 0; i < 27; i++) {
+    const event = makeEvent({ session_id: 'synthetic', prompt_id: String(i), prompt: '合成', occurred_at: new Date(i * 1000).toISOString() }, 'prompt');
+    event.instance_origin = f.url; ids.push(event.client_event_id);
+    await f.write(`spool/${spoolFilename(event)}`, event);
+  }
+  f.state.delayMs = 1500;
+  for (let i = 0; i < 2; i++) {
+    const started = Date.now(); sessionContext(await f.hook('SessionStart'));
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 4000); t.diagnostic(`hook ${i + 1}: ${elapsed} ms`);
+    assert.equal((await f.names('spool')).length, i === 0 ? 7 : 0);
+    assert.equal((await f.names('sent')).length, i === 0 ? 20 : 27);
+  }
+  const posts = f.requests.filter(r => r.method === 'POST');
+  assert.ok(posts.every(r => r.body.events.length <= 20));
+  assert.deepEqual(new Set(posts.flatMap(r => r.body.events.map(e => e.client_event_id))), new Set(ids));
+  assert.equal(f.seen.size, 27);
+});
+test('POST beyond the remaining deadline retains its batch; next run replays without loss', async t => {
+  const f = await fixture(t);
+  let last;
+  for (let i = 0; i < 21; i++) {
+    const event = makeEvent({ session_id: 'synthetic', prompt_id: String(i), prompt: '合成', occurred_at: new Date(i * 1000).toISOString() }, 'prompt');
+    event.instance_origin = f.url; last = event;
+    await f.write(`spool/${spoolFilename(event)}`, event);
+  }
+  f.state.delayMs = 1000;
+  const started = Date.now(); sessionContext(await f.hook('SessionStart'));
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 4000); t.diagnostic(`deadline hook: ${elapsed} ms`);
+  assert.deepEqual(await f.names('spool'), [spoolFilename(last)]);
+  assert.equal((await f.names('sent')).length, 20);
+  assert.equal(f.seen.size, 21); // The last receipt arrived after the client deadline.
+  f.state.delayMs = 0; f.requests.length = 0;
+  sessionContext(await f.hook('SessionStart'));
+  assert.deepEqual(f.requests.filter(r => r.method === 'POST').flatMap(r => r.body.events.map(e => e.client_event_id)), [last.client_event_id]);
+  assert.equal((await f.names('spool')).length, 0);
+  assert.equal((await f.names('sent')).length, 21); assert.equal(f.seen.size, 21);
 });

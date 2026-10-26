@@ -1,6 +1,6 @@
-# HMP plugin 0.1.0
+# HMP plugin 0.1.1
 
-Claude Code から HMP へ質問と最終回答を渡す小さな殻です。Node.js 22 以上、依存パッケージなし。契約の `client_version` は `0.1.0`。マーケットプレイスと plugin の manifest に version は書きません。
+Claude Code から HMP へ質問と最終回答を渡す小さな殻です。Node.js 22 以上、依存パッケージなし。契約の `client_version` は `0.1.1`。マーケットプレイスと plugin の manifest に version は書きません。
 
 ## インストール
 
