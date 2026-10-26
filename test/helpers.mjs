@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 export const scripts = resolve('plugins/hmp/scripts');
 export const workerInit = { type: 'system', subtype: 'init', mcp_servers: [{ name: 'hmp', status: 'connected' }],
   tools: ['mcp__hmp__claim_extraction', 'mcp__hmp__submit_extraction', 'mcp__hmp__submit_purpose_links', 'mcp__hmp__claim_line_job', 'mcp__hmp__submit_line_blocks'] };
+export const extractionWorkerInit = { ...workerInit, tools: workerInit.tools.slice(0, 3) };
 export const workerSuccess = { type: 'result', subtype: 'success', is_error: false, result: 'OK' };
 export const successfulClaude = `process.stdout.write(${JSON.stringify(JSON.stringify(workerInit) + '\n' + JSON.stringify(workerSuccess) + '\n')});`;
 let reportedFallback = false;

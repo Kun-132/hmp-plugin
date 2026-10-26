@@ -3,19 +3,26 @@ import assert from 'node:assert/strict';
 import { readFile, stat, writeFile, mkdtemp, symlink, rm, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fixture, successfulClaude, workerInit, workerSuccess } from './helpers.mjs';
-import { TOOLS, MAXIMUM, effectiveLimits, claudeArgs, createStreamGuard, runClaude, supportedVersion, connectedWorker } from '../plugins/hmp/scripts/worker.mjs';
+import { fixture, successfulClaude, workerInit, extractionWorkerInit, workerSuccess } from './helpers.mjs';
+import { TOOLS, EXTRACTION_TOOLS, LINE_TOOLS, MAXIMUM, effectiveLimits, claudeArgs, createStreamGuard, runClaude, supportedVersion, connectedWorker } from '../plugins/hmp/scripts/worker.mjs';
 
 const launchLog = `const fs = require('node:fs'); const p = require('node:path');
 fs.appendFileSync(p.join(process.env.HOME, 'launches.jsonl'), JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2),
   credential: Object.hasOwn(process.env, 'HMP_CLIENT_TOKEN'), extra: Object.hasOwn(process.env, 'UNTRUSTED_PROVIDER_OVERRIDE') }) + '\\n');
 ${successfulClaude}`;
+const launchWithInit = init => launchLog.replace(successfulClaude,
+  `process.stdout.write(${JSON.stringify(JSON.stringify(init) + '\n' + JSON.stringify(workerSuccess) + '\n')});`);
+const allowedTools = args => args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--permission-mode'));
 const readLaunches = async f => (await readFile(join(f.home, 'launches.jsonl'), 'utf8').catch(e => { if (e.code === 'ENOENT') return ''; throw e; }))
   .trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
 async function ready(f, limits = {}) { await f.write('server-config.json', { pending: { extraction: 30, lines: 30 }, limits }); }
 test('tool list is immutable and CLI isolation cannot be extended by config', () => {
   assert.equal(Object.isFrozen(TOOLS), true);
+  assert.equal(Object.isFrozen(EXTRACTION_TOOLS), true);
+  assert.equal(Object.isFrozen(LINE_TOOLS), true);
   assert.deepEqual(TOOLS, ['mcp__hmp__claim_extraction', 'mcp__hmp__submit_extraction', 'mcp__hmp__submit_purpose_links', 'mcp__hmp__claim_line_job', 'mcp__hmp__submit_line_blocks']);
+  assert.deepEqual(EXTRACTION_TOOLS, TOOLS.slice(0, 3));
+  assert.deepEqual(LINE_TOOLS, TOOLS.slice(3));
   const args = claudeArgs('/tmp/synthetic-run');
   assert.equal(args[args.indexOf('--setting-sources') + 1], '');
   assert.equal(args[args.indexOf('--tools') + 1], 'Read');
@@ -24,22 +31,44 @@ test('tool list is immutable and CLI isolation cannot be extended by config', ()
   const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
   assert.equal(settings.disableAllHooks, true); assert.equal(settings.permissions.blockReadsOutsideWorkingDirectories, true);
   assert.deepEqual(args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--permission-mode')),
-    [...TOOLS, 'Read(//tmp/synthetic-run/**)']);
+    [...EXTRACTION_TOOLS, 'Read(//tmp/synthetic-run/**)']);
+  const lineArgs = claudeArgs('/tmp/synthetic-run', { claimTool: LINE_TOOLS[0] });
+  assert.deepEqual(allowedTools(lineArgs), [...LINE_TOOLS, 'Read(//tmp/synthetic-run/**)']);
+  assert.throws(() => claudeArgs('/tmp/synthetic-run', { claimTool: 'Bash' }), /invalid_claim/);
 });
-test('readiness requires authenticated hmp and every fixed worker tool', () => {
-  assert.equal(connectedWorker(workerInit), true);
+test('readiness requires authenticated hmp and every fixed tool of the requested stage', () => {
+  for (const stage of [EXTRACTION_TOOLS, LINE_TOOLS]) assert.equal(connectedWorker(workerInit, stage), true);
+  assert.equal(connectedWorker(extractionWorkerInit, EXTRACTION_TOOLS), true);
+  assert.equal(connectedWorker(extractionWorkerInit, LINE_TOOLS), false);
+  const lineInit = { ...workerInit, tools: [...LINE_TOOLS] };
+  assert.equal(connectedWorker(lineInit, EXTRACTION_TOOLS), false);
+  assert.equal(connectedWorker(lineInit, LINE_TOOLS), true);
   for (const event of [
     { ...workerInit, mcp_servers: [{ name: 'hmp', status: 'needs-auth' }] },
     { ...workerInit, mcp_servers: [{ name: 'other', status: 'connected' }] },
-    { ...workerInit, tools: workerInit.tools.slice(1) },
+    { ...workerInit, tools: [] },
     { ...workerInit, mcp_server_errors: [{ name: 'hmp' }] },
     { type: 'result', subtype: 'success' },
-  ]) assert.equal(Boolean(connectedWorker(event)), false);
+  ]) for (const stage of [EXTRACTION_TOOLS, LINE_TOOLS]) assert.equal(connectedWorker(event, stage), false);
+  for (const stage of [EXTRACTION_TOOLS, LINE_TOOLS]) {
+    for (const missing of stage) assert.equal(connectedWorker({ ...workerInit, tools: TOOLS.filter(tool => tool !== missing) }, stage), false);
+  }
   const args = claudeArgs('/tmp/synthetic-run', { verify: true });
   assert.equal(args[args.indexOf('--tools') + 1], '');
   assert.equal(args.includes('--allowedTools'), false);
   assert.equal(args[args.indexOf('--permission-mode') + 1], 'dontAsk');
   assert.deepEqual(JSON.parse(args[args.indexOf('--settings') + 1]).permissions.ask, ['mcp__*']);
+});
+test('each stage guard forbids every tool from the other stage in partial and complete messages', () => {
+  for (const [stage, other] of [[EXTRACTION_TOOLS, LINE_TOOLS], [LINE_TOOLS, EXTRACTION_TOOLS]]) {
+    const guard = createStreamGuard('/tmp/synthetic-run', stage[0]);
+    for (const name of stage) guard({ type: 'assistant', message: { content: [{ type: 'tool_use', name, id: name, input: {} }] } });
+    for (const name of other) {
+      const block = { type: 'tool_use', name, id: 'forbidden', input: {} };
+      assert.throws(() => guard({ type: 'assistant', message: { content: [block] } }), /forbidden_tool/);
+      assert.throws(() => guard({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: block } }), /forbidden_tool/);
+    }
+  }
 });
 test('limits are min(hard maximum, config); invalid and zero cannot enable work', () => {
   assert.deepEqual(MAXIMUM, { max_runs_per_day: 24, max_items_per_run: 8, max_minutes: 20 });
@@ -92,13 +121,58 @@ test('worker enforces 8 items despite inflated remote limits/tools, strips crede
   await ready(f, { max_runs_per_day: 1000, max_items_per_run: 1000, max_minutes: 1000, allowedTools: ['Bash'] });
   const result = await f.run('worker.mjs'); assert.equal(result.code, 0); assert.equal(result.stdout, '');
   const launches = await readLaunches(f); assert.equal(launches.length, 8);
+  assert.deepEqual(launches.map(launch => allowedTools(launch.args)[0]),
+    Array.from({ length: 8 }, (_, i) => i % 2 ? LINE_TOOLS[0] : EXTRACTION_TOOLS[0]));
   for (const launch of launches) {
     assert.equal(launch.credential, false); assert.equal(launch.extra, false);
     assert.notEqual(launch.cwd, f.project); assert.ok(launch.cwd.includes('hmp-worker-'));
     assert.ok(!launch.args.includes('Bash'));
+    const stage = launch.args.includes(LINE_TOOLS[0]) ? LINE_TOOLS : EXTRACTION_TOOLS;
+    assert.deepEqual(allowedTools(launch.args), [...stage, `Read(/${launch.cwd}/**)`]);
   }
   assert.equal((await f.read('worker-usage.json')).runs, 1);
   await assert.rejects(stat(join(f.home, '.hmp/worker.lock')), { code: 'ENOENT' });
+});
+test('extraction-only init skips every line launch and fills the item limit with extractions', async t => {
+  for (const max_items_per_run of [3, 8]) {
+    const f = await fixture(t, { claude: launchWithInit(extractionWorkerInit) });
+    await ready(f, { max_items_per_run });
+    await f.run('worker.mjs');
+    const launches = await readLaunches(f);
+    assert.equal(launches.length, max_items_per_run);
+    for (const launch of launches) {
+      assert.equal(launch.args.includes(LINE_TOOLS[0]), false);
+      assert.deepEqual(allowedTools(launch.args), [...EXTRACTION_TOOLS, `Read(/${launch.cwd}/**)`]);
+    }
+  }
+});
+test('extraction-only fallback never exceeds pending extractions', async t => {
+  const f = await fixture(t, { claude: launchWithInit(extractionWorkerInit) });
+  await f.write('server-config.json', { pending: { extraction: 2, lines: 30 } });
+  await f.run('worker.mjs');
+  assert.equal((await readLaunches(f)).length, 2);
+});
+test('missing extraction tools stop the entire queue after the first launch', async t => {
+  const f = await fixture(t, { claude: launchWithInit({ ...workerInit, tools: [...LINE_TOOLS] }) });
+  await ready(f); await f.run('worker.mjs');
+  assert.equal((await readLaunches(f)).length, 1);
+});
+test('line stage becoming unavailable kills it immediately and continues only extractions', async t => {
+  const f = await fixture(t, { claude: launchLog.replace(successfulClaude, `
+if (process.argv.includes(${JSON.stringify(LINE_TOOLS[0])})) {
+  process.stdout.write(${JSON.stringify(JSON.stringify(extractionWorkerInit) + '\n')});
+  setTimeout(() => fs.writeFileSync(p.join(process.env.HOME, 'escaped'), 'synthetic'), 2000);
+} else { ${successfulClaude} }`) });
+  await ready(f); await f.run('worker.mjs');
+  const launches = await readLaunches(f);
+  assert.equal(launches.length, 8);
+  assert.equal(launches.filter(launch => launch.args.includes(LINE_TOOLS[0])).length, 1);
+  await assert.rejects(stat(join(f.home, 'escaped')), { code: 'ENOENT' });
+});
+test('runClaude distinguishes missing stage tools from connection and execution failures', async t => {
+  const f = await fixture(t, { claude: `process.stdout.write(${JSON.stringify(JSON.stringify(extractionWorkerInit) + '\n')}); setTimeout(() => {}, 30000);` });
+  const result = await runClaude(f.project, LINE_TOOLS[0], 2000, { binary: join(f.bin, 'claude') });
+  assert.deepEqual(result, { status: 'stage_unavailable', lines: false });
 });
 test('daily and lower item limits hold, zero prevents launch', async t => {
   const f = await fixture(t, { claude: launchLog });
@@ -156,7 +230,7 @@ setTimeout(() => fs.writeFileSync(p.join(process.env.HOME,'escaped'), 'synthetic
 test('wall-clock timeout kills process group without output', async t => {
   const f = await fixture(t, { claude: 'setTimeout(() => {}, 30000);' });
   const result = await runClaude(f.project, TOOLS[0], 50, { binary: join(f.bin, 'claude') });
-  assert.equal(result, false);
+  assert.deepEqual(result, { status: 'failed', lines: false });
 });
 test('SessionStart pending launches detached worker using only sanitized cached config', async t => {
   const f = await fixture(t, { claude: launchLog,

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, writeFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fixture, workerInit, workerSuccess, successfulClaude } from './helpers.mjs';
+import { fixture, workerInit, extractionWorkerInit, workerSuccess, successfulClaude } from './helpers.mjs';
 import { validateConfig, validateMcp, loadToken } from '../plugins/hmp/scripts/config.mjs';
 
 test('config accepts HTTPS/loopback, refuses unsafe URLs and devices', () => {
@@ -46,7 +46,18 @@ test('setup backs up, records diff/rollback, verifies bytes and instance label; 
   assert.deepEqual(await f.read('config.json'), before);
   const verified = await f.run('manage.mjs', ['verify']); assert.equal(verified.code, 0, verified.stderr);
   assert.equal(JSON.parse(verified.stdout).instance_label, '合成テスト用 HMP');
-  assert.deepEqual(JSON.parse(verified.stdout).worker, { ready: true, server: 'hmp', url: f.url + '/mcp' });
+  assert.deepEqual(JSON.parse(verified.stdout).worker, { ready: true, lines: true, server: 'hmp', url: f.url + '/mcp' });
+});
+test('verify is ready without line tools and reports lines false without calling tools', async t => {
+  const f = await fixture(t, { claude: `
+if (process.argv.includes('--allowedTools') || process.argv[process.argv.indexOf('--tools') + 1] !== '' ||
+  process.argv[process.argv.indexOf('--permission-mode') + 1] !== 'dontAsk' ||
+  JSON.stringify(JSON.parse(process.argv[process.argv.indexOf('--settings') + 1]).permissions.ask) !== '["mcp__*"]') process.exit(1);
+process.stdout.write(${JSON.stringify(JSON.stringify(extractionWorkerInit) + '\n' + JSON.stringify(workerSuccess) + '\n')});` });
+  const result = await f.run('manage.mjs', ['verify']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).worker, { ready: true, lines: false, server: 'hmp', url: f.url + '/mcp' });
+  await assert.rejects(stat(join(f.home, '.hmp/worker-usage.json')), { code: 'ENOENT' });
 });
 test('verify uses worker credentials/config isolation and removes its temporary working directory', async t => {
   const f = await fixture(t, { claude: `const fs = require('node:fs');
@@ -96,7 +107,7 @@ test('pause and resume record changes, status returns only metadata', async t =>
   assert.equal((await f.run('manage.mjs', ['pause', '0'])).code, 0);
   assert.ok(Date.parse((await f.read('pause')).until) <= Date.now());
   const status = await f.run('manage.mjs', ['status']); assert.equal(status.code, 0);
-  assert.deepEqual(JSON.parse(status.stdout), { client_version: '0.1.1', spool: 0, spool_held: 0, last_send: null, pending: { extraction: 4, lines: 2 } });
+  assert.deepEqual(JSON.parse(status.stdout), { client_version: '0.1.2', spool: 0, spool_held: 0, last_send: null, pending: { extraction: 4, lines: 2 } });
 });
 async function history(f) {
   const dir = join(f.home, '.claude/projects/synthetic-project'); await mkdir(dir, { recursive: true });

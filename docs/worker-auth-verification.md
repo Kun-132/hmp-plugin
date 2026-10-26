@@ -19,7 +19,7 @@ setup が生成する `~/.hmp/mcp.json` をそのまま対話 Claude Code に読
 - onboard のプレビューも origin を記録し、別 origin へ切替後の送信・origin 不明の旧計画の送信を拒否する。
 - 導入順を release の実 URL → ブラウザ `/authorize/connect` で Google ログイン・同意・端末トークン発行 → setup が示す account の登録 → `claude mcp add --transport http --scope user hmp <instance_url>/mcp` と対話認証 → verify に統一した。user scope はプロジェクトをまたいで同名・同 URL を登録するために使う。認証時には処理役の JSON を明示し、別の local scope 設定を認証する取り違えも避ける。
 
-verify は client API に加え、同じ MCP 設定・認証保存先・設定隔離を使った headless 接続と短いモデル応答を検証する。MCP の接続済み状態、固定5ツール、成功 result が揃った場合だけ成功する。確認時は組込みツールを無効化し、MCP に ask を設定して dontAsk で呼出しを拒否する。stream に tool_use があれば終了する。claim/submit の実行権限自体は検証しない。
+verify は client API に加え、同じ MCP 設定・認証保存先・設定隔離を使った headless 接続と短いモデル応答を検証する。MCP の接続済み状態、抽出の3ツール、成功 result が揃った場合だけ成功する。線の2ツールが揃うかは `lines: true|false` で返す。処理時の許可ツールは抽出3つ・線2つを段階ごとに固定し、1起動ではその段階だけを許可する。線のツールがないインスタンスでは線の起動を省き、上限内で抽出だけ続ける。確認時は組込みツールを無効化し、MCP に ask を設定して dontAsk で呼出しを拒否する。stream に tool_use があれば終了する。claim/submit の実行権限自体は検証しない。
 
 ## 公式文書で確認したこと
 
