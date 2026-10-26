@@ -1,6 +1,6 @@
-# HMP plugin 0.1.2
+# HMP plugin 0.1.3
 
-Claude Code から HMP へ質問と最終回答を渡す小さな殻です。Node.js 22 以上、依存パッケージなし。契約の `client_version` は `0.1.2`。マーケットプレイスと plugin の manifest に version は書きません。
+Claude Code から HMP へ質問と最終回答を渡す小さな殻です。Node.js 22 以上、依存パッケージなし。契約の `client_version` は `0.1.3`。マーケットプレイスと plugin の manifest に version は書きません。
 
 ## インストール
 
@@ -63,7 +63,7 @@ claude --strict-mcp-config --mcp-config "$HOME/.hmp/mcp.json" \
 
 [公式 MCP 認証仕様](https://code.claude.com/docs/en/mcp#authenticate-with-remote-mcp-servers) は headless の前に対話で認証する手順を案内しています。strict は接続先の指定を限定する設定です。[bare モード](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode) は OAuth・keychain を読まないため使用しません。手元の実 CLI で確認できた範囲と未確認事項は [認証の検証記録](docs/worker-auth-verification.md) を参照してください。
 
-許可する MCP は段階ごとに固定し、抽出は `claim_extraction`、`submit_extraction`、`submit_purpose_links` の3つ、線は `claim_line_job`、`submit_line_blocks` の2つだけです。1起動ではその段階のツールだけを許可し、線のツールがないインスタンスでは線の起動を省いて上限内で抽出だけ続けます。`--strict-mcp-config`、`--setting-sources ''`、`disableAllHooks`、`--permission-mode dontAsk`、`--permission-prompts none` を使います。組込みツールは Read のみで、実行ごとの一時ディレクトリだけを許可し、`blockReadsOutsideWorkingDirectories` も設定します。`CLAUDE_CONFIG_DIR` は対話セッションと認証保存先を揃えるため引き継ぎます。provider・トークンの環境変数は引き継ぎません。通常ログインの認証保存先を使うため、環境変数だけによるモデル認証は対象外です。
+許可する MCP は段階ごとに固定し、抽出は `claim_extraction`、`submit_extraction`、`submit_purpose_links` の3つ、線は `claim_line_job`、`submit_line_blocks` の2つだけです。1起動ではその段階のツールだけを許可し、線のツールがないインスタンスでは線の起動を省いて上限内で抽出だけ続けます。`--strict-mcp-config`、`--setting-sources ''`、`disableAllHooks`、`--permission-mode dontAsk`、`--permission-prompts none` を使います。組込みツールは Read のみで、実行ごとの一時ディレクトリだけを許可し、`blockReadsOutsideWorkingDirectories` も設定します。MCP の返り値が大きいと Claude Code は作業ディレクトリ外の `tool-results` に保存して Read を促し、Read 境界で止まるため、処理役では `MAX_MCP_OUTPUT_TOKENS=100000` を固定し、claim の返り値を会話内で受け取ります。`CLAUDE_CONFIG_DIR` は対話セッションと認証保存先を揃えるため引き継ぎます。provider・トークンの環境変数は引き継ぎません。通常ログインの認証保存先を使うため、環境変数だけによるモデル認証は対象外です。
 
 部分 stream の tool header と完成 input を監視し、許可外ツール、範囲外 Read（実体パスも確認）、2回目の claim、4回目の submit でプロセスグループを即終了します。stream 監視は Claude Code の権限制御に加える安全装置です。Read 境界設定に対応する Claude Code **2.1.309 以上**を必要とし、それより古い版では処理役を起動しません。
 

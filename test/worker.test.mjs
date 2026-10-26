@@ -4,11 +4,12 @@ import { readFile, stat, writeFile, mkdtemp, symlink, rm, realpath } from 'node:
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fixture, successfulClaude, workerInit, extractionWorkerInit, workerSuccess } from './helpers.mjs';
-import { TOOLS, EXTRACTION_TOOLS, LINE_TOOLS, MAXIMUM, effectiveLimits, claudeArgs, createStreamGuard, runClaude, supportedVersion, connectedWorker } from '../plugins/hmp/scripts/worker.mjs';
+import { TOOLS, EXTRACTION_TOOLS, MCP_OUTPUT_TOKENS, LINE_TOOLS, MAXIMUM, effectiveLimits, claudeArgs, createStreamGuard, runClaude, supportedVersion, connectedWorker } from '../plugins/hmp/scripts/worker.mjs';
 
 const launchLog = `const fs = require('node:fs'); const p = require('node:path');
 fs.appendFileSync(p.join(process.env.HOME, 'launches.jsonl'), JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2),
-  credential: Object.hasOwn(process.env, 'HMP_CLIENT_TOKEN'), extra: Object.hasOwn(process.env, 'UNTRUSTED_PROVIDER_OVERRIDE') }) + '\\n');
+  credential: Object.hasOwn(process.env, 'HMP_CLIENT_TOKEN'), extra: Object.hasOwn(process.env, 'UNTRUSTED_PROVIDER_OVERRIDE'),
+  mcpOutput: process.env.MAX_MCP_OUTPUT_TOKENS, largeFiles: process.env.ENABLE_MCP_LARGE_OUTPUT_FILES }) + '\\n');
 ${successfulClaude}`;
 const launchWithInit = init => launchLog.replace(successfulClaude,
   `process.stdout.write(${JSON.stringify(JSON.stringify(init) + '\n' + JSON.stringify(workerSuccess) + '\n')});`);
@@ -118,6 +119,7 @@ test('stream guard checks partial headers, final inputs, claim/submit counts and
 test('worker enforces 8 items despite inflated remote limits/tools, strips credentials', async t => {
   const f = await fixture(t, { claude: launchLog });
   f.env.UNTRUSTED_PROVIDER_OVERRIDE = 'synthetic';
+  f.env.MAX_MCP_OUTPUT_TOKENS = '1'; f.env.ENABLE_MCP_LARGE_OUTPUT_FILES = 'false';
   await ready(f, { max_runs_per_day: 1000, max_items_per_run: 1000, max_minutes: 1000, allowedTools: ['Bash'] });
   const result = await f.run('worker.mjs'); assert.equal(result.code, 0); assert.equal(result.stdout, '');
   const launches = await readLaunches(f); assert.equal(launches.length, 8);
@@ -125,6 +127,8 @@ test('worker enforces 8 items despite inflated remote limits/tools, strips crede
     Array.from({ length: 8 }, (_, i) => i % 2 ? LINE_TOOLS[0] : EXTRACTION_TOOLS[0]));
   for (const launch of launches) {
     assert.equal(launch.credential, false); assert.equal(launch.extra, false);
+    // A large claim stays inline: a spilled result lives outside the read fence and would stop the worker.
+    assert.equal(launch.mcpOutput, String(MCP_OUTPUT_TOKENS)); assert.equal(launch.largeFiles, undefined);
     assert.notEqual(launch.cwd, f.project); assert.ok(launch.cwd.includes('hmp-worker-'));
     assert.ok(!launch.args.includes('Bash'));
     const stage = launch.args.includes(LINE_TOOLS[0]) ? LINE_TOOLS : EXTRACTION_TOOLS;
