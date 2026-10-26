@@ -1,6 +1,6 @@
-# HMP plugin 0.1.1
+# HMP plugin 0.1.2
 
-Claude Code から HMP へ質問と最終回答を渡す小さな殻です。Node.js 22 以上、依存パッケージなし。契約の `client_version` は `0.1.1`。マーケットプレイスと plugin の manifest に version は書きません。
+Claude Code から HMP へ質問と最終回答を渡す小さな殻です。Node.js 22 以上、依存パッケージなし。契約の `client_version` は `0.1.2`。マーケットプレイスと plugin の manifest に version は書きません。
 
 ## インストール
 
@@ -59,11 +59,11 @@ claude --strict-mcp-config --mcp-config "$HOME/.hmp/mcp.json" \
 
 その対話セッションの `/mcp` から **`hmp`** を選び、URL が **setup で設定した instance_url + `/mcp`** であることを確認して Authenticate を選びます。例なら `https://hmp.example/mcp` です。ブラウザで認証を完了してください。別名や末尾スラッシュ違いの既存サーバーでの認証を前提にせず、処理役と同じ JSON で認証します。トークンをコピーしたり JSON に保存したりする必要はありません。OAuth の保存・更新は Claude Code が担当します。keychain がロックされている場合や失効後は解除・再認証が必要です。
 
-本人の認証後に `/hmp:setup` の verify を完了します。手動なら `node "${CLAUDE_PLUGIN_ROOT}/scripts/manage.mjs" verify`。client API のインスタンス名に加え、処理役の MCP 設定で `hmp` が接続済み、固定5ツールが公開済み、短いモデル応答が成功した場合だけ `worker.ready: true` を返します。失敗時は exit 1 で認証情報・応答本文を表示しません。確認用の Claude は組込みツールなし、MCP は `ask` + `dontAsk` で呼出しを拒否し、claim/submit は行いません。最大30秒、モデル利用分が発生します。日次の処理回数は消費しません。verify はツールの公開を確認し、実データの claim/submit の成功までは保証しません。
+本人の認証後に `/hmp:setup` の verify を完了します。手動なら `node "${CLAUDE_PLUGIN_ROOT}/scripts/manage.mjs" verify`。client API のインスタンス名に加え、処理役の MCP 設定で `hmp` が接続済み、抽出の3ツールが公開済み、短いモデル応答が成功した場合だけ `worker.ready: true` を返します。線の2ツールが揃うかは `worker.lines: true|false` で返し、線のツールがないインスタンスでは抽出だけ回します。失敗時は exit 1 で認証情報・応答本文を表示しません。確認用の Claude は組込みツールなし、MCP は `ask` + `dontAsk` で呼出しを拒否し、claim/submit は行いません。最大30秒、モデル利用分が発生します。日次の処理回数は消費しません。verify はツールの公開を確認し、実データの claim/submit の成功までは保証しません。
 
 [公式 MCP 認証仕様](https://code.claude.com/docs/en/mcp#authenticate-with-remote-mcp-servers) は headless の前に対話で認証する手順を案内しています。strict は接続先の指定を限定する設定です。[bare モード](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode) は OAuth・keychain を読まないため使用しません。手元の実 CLI で確認できた範囲と未確認事項は [認証の検証記録](docs/worker-auth-verification.md) を参照してください。
 
-許可する MCP は `claim_extraction`、`submit_extraction`、`submit_purpose_links`、`claim_line_job`、`submit_line_blocks` の5つに固定。`--strict-mcp-config`、`--setting-sources ''`、`disableAllHooks`、`--permission-mode dontAsk`、`--permission-prompts none` を使います。組込みツールは Read のみで、実行ごとの一時ディレクトリだけを許可し、`blockReadsOutsideWorkingDirectories` も設定します。`CLAUDE_CONFIG_DIR` は対話セッションと認証保存先を揃えるため引き継ぎます。provider・トークンの環境変数は引き継ぎません。通常ログインの認証保存先を使うため、環境変数だけによるモデル認証は対象外です。
+許可する MCP は段階ごとに固定し、抽出は `claim_extraction`、`submit_extraction`、`submit_purpose_links` の3つ、線は `claim_line_job`、`submit_line_blocks` の2つだけです。1起動ではその段階のツールだけを許可し、線のツールがないインスタンスでは線の起動を省いて上限内で抽出だけ続けます。`--strict-mcp-config`、`--setting-sources ''`、`disableAllHooks`、`--permission-mode dontAsk`、`--permission-prompts none` を使います。組込みツールは Read のみで、実行ごとの一時ディレクトリだけを許可し、`blockReadsOutsideWorkingDirectories` も設定します。`CLAUDE_CONFIG_DIR` は対話セッションと認証保存先を揃えるため引き継ぎます。provider・トークンの環境変数は引き継ぎません。通常ログインの認証保存先を使うため、環境変数だけによるモデル認証は対象外です。
 
 部分 stream の tool header と完成 input を監視し、許可外ツール、範囲外 Read（実体パスも確認）、2回目の claim、4回目の submit でプロセスグループを即終了します。stream 監視は Claude Code の権限制御に加える安全装置です。Read 境界設定に対応する Claude Code **2.1.309 以上**を必要とし、それより古い版では処理役を起動しません。
 

@@ -18,7 +18,7 @@ test('prompt/Stop send only question/final answer, with stable ids and version',
   quiet(await f.hook('UserPromptSubmit', { tool_output: 'SYNTHETIC_TOOL', transcript_path: '/nonexistent' }));
   quiet(await f.hook('Stop', { tool_output: 'SYNTHETIC_TOOL' }));
   const [prompt, response] = f.requests.map(r => r.body);
-  assert.equal(prompt.client_version, '0.1.1'); assert.equal(prompt.device, 'synthetic-device');
+  assert.equal(prompt.client_version, '0.1.2'); assert.equal(prompt.device, 'synthetic-device');
   assert.equal(prompt.events[0].kind, 'prompt'); assert.equal(prompt.events[0].text, '合成の質問');
   assert.equal(response.events[0].kind, 'response'); assert.equal(response.events[0].text, '合成の最終回答');
   assert.equal(prompt.events[0].session, 'synthetic-session');
@@ -245,4 +245,11 @@ test('POST beyond the remaining deadline retains its batch; next run replays wit
   assert.deepEqual(f.requests.filter(r => r.method === 'POST').flatMap(r => r.body.events.map(e => e.client_event_id)), [last.client_event_id]);
   assert.equal((await f.names('spool')).length, 0);
   assert.equal((await f.names('sent')).length, 21); assert.equal(f.seen.size, 21);
+});
+test('SessionStart waits beyond 750 ms for config within the hook deadline', async t => {
+  const f = await fixture(t, { remote: { pending: { extraction: 3, lines: 0 }, limits: { max_runs_per_day: 0 } } });
+  f.state.delayMs = 1200;
+  const started = Date.now(); sessionContext(await f.hook('SessionStart'));
+  assert.ok(Date.now() - started < 4000);
+  assert.deepEqual((await f.read('server-config.json')).pending, { extraction: 3, lines: 0 });
 });

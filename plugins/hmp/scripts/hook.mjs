@@ -41,7 +41,8 @@ async function main() {
     const token = await loadToken(config);
     if (!token) return;
     try { await flush(config, token, { deadline: Math.min(deadline, Date.now() + 1800), max: 200 }); } catch {}
-    const remote = await request(config, token, '/api/client/config', { deadline });
+    // The 750 ms request default aborts a cold TLS + D1 config read; the worker then never learns of pending work.
+    const remote = await request(config, token, '/api/client/config', { deadline, timeout: deadline - Date.now() });
     const summary = serverSummary(remote);
     await writeJSON(pathFor('server-config.json'), summary);
     if (summary.notice) context.push('HMP プラグインの更新があります: claude plugin update hmp@hmp-marketplace');
