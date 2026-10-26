@@ -19,6 +19,9 @@ function toolsForClaim(claimTool) {
   if (claimTool === LINE_TOOLS[0]) return LINE_TOOLS;
   throw Error('invalid_claim');
 }
+// Claude Code saves an MCP result above this many tokens (default 25000) to a file outside the working
+// directory and asks the model to Read it, which the read fence must refuse. Keep claims inline instead.
+export const MCP_OUTPUT_TOKENS = 100_000;
 export const MAXIMUM = Object.freeze({ max_runs_per_day: 24, max_items_per_run: 8, max_minutes: 20 });
 // Earlier CLIs may silently ignore the read fence setting. Never downgrade this boundary.
 export function supportedVersion(text) {
@@ -47,7 +50,7 @@ export function claudeEnv() {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   if (env.CLAUDE_CONFIG_DIR) env.CLAUDE_CONFIG_DIR = resolve(env.CLAUDE_CONFIG_DIR);
-  return { ...env, ENABLE_TOOL_SEARCH: 'false', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1',
+  return { ...env, MAX_MCP_OUTPUT_TOKENS: String(MCP_OUTPUT_TOKENS), ENABLE_TOOL_SEARCH: 'false', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' };
 }
 export function claudeArgs(directory, { verify = false, claimTool = EXTRACTION_TOOLS[0] } = {}) {
