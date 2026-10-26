@@ -1,0 +1,13 @@
+# release always needs the owner's approval; main needs it only for CI, the gate, and dependencies.
+# CI judges with the base branch's copy, so a PR cannot loosen its own gate.
+# Patterns: `*` matches one path segment, `**` matches across segments.
+approvers:
+  - Kun-132
+
+high:
+  ci:
+    - .github/**
+    - scripts/risk-gate.mjs
+    - package.json
+    - package-lock.json
+    - .npmrc

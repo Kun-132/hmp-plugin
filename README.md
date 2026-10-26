@@ -83,7 +83,11 @@ setup・pause は **バックアップ → diff の記録 → 戻し手順の記
 
 ループバック待受が `EPERM` / `EACCES` で拒否された場合は、診断を出してテスト専用の IPC fetch に自動で切り替えます。`HMP_TEST_TRANSPORT=ipc npm test` でも明示できます。同じモックの要求・応答を使いますが、IPC 経由では実 TCP 通信の確認にはなりません。それ以外の待受エラーは失敗として扱います。製品コードはこの経路を参照しません。CLI 検証は `node test/validate.mjs /absolute/path/to/claude`（一時 HOME）で実行できます。OAuth 往復の合成検証は `node test/oauth-probe.mjs /absolute/path/to/claude`。待受不可の環境では失敗として報告し、IPC で代替しません。`--offline` を付けると合成 OAuth 保存データの検索だけを実 CLI と偽 keychain で検証します（HTTP 成功や対話認証完了の検証にはなりません）。
 
-配布前に本人が GitHub の main/release 保護・本人承認必須・CODEOWNERS の承認必須を設定し、release ブランチだけを配布してください。CODEOWNERS は同梱しました。この環境では loopback が EPERM で拒否されるため、OAuth 往復と MCP 通信成功は未検証です。配布前には制約のない合成環境で OAuth プローブを通し、本人の端末で初回認証 → verify → SessionStart の発火と claim/submit を確認してください。古いクライアント互換、P1 段A も別途確認が必要です。既存 launchd との並行比較・停止、S10 の運用課題の解消はこのリポジトリでは行いません。
+配布用 release への PR は常に、main への PR は `.github/**`・`scripts/risk-gate.mjs`・`package.json`・`package-lock.json`・`.npmrc` を変えるときだけ、Kun-132 が最新コミットに付けた APPROVED レビューを必要とします。bot・コメント・古いコミットの承認は数えず、同じ承認者の後の CHANGES_REQUESTED／DISMISSED で取り消します。
+それ以外の main 向け PR は CI 通過で進めます。gate は独立した `pull_request_target` workflow で base 側の設定とコードだけを使い、変更ファイルとレビューを API で取得します。PR 側のコードは checkout・実行しません。
+必須チェックは `test` と `risk-gate`。配布前に本人が main/release の保護に設定し、release ブランチだけを配布してください。CODEOWNERS は同梱しています。
+
+この環境では loopback が EPERM で拒否されるため、OAuth 往復と MCP 通信成功は未検証です。配布前には制約のない合成環境で OAuth プローブを通し、本人の端末で初回認証 → verify → SessionStart の発火と claim/submit を確認してください。古いクライアント互換、P1 段A も別途確認が必要です。既存 launchd との並行比較・停止、S10 の運用課題の解消はこのリポジトリでは行いません。
 
 ## 残さない・消す
 
