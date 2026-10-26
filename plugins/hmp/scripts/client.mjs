@@ -1,6 +1,6 @@
 import { CLIENT_VERSION } from './config.mjs';
 
-// Hooks keep the 750 ms cap so a slow network never delays the session; manual commands wait longer.
+// Requests default to 750 ms; event batches use the remaining hook deadline, manual commands wait longer.
 export const manual = () => ({ deadline: Date.now() + 8000, timeout: 8000 });
 export async function request(config, token, path, { body, deadline = Date.now() + 750, timeout = 750 } = {}) {
   if (!token || deadline <= Date.now()) throw Error('unavailable');
