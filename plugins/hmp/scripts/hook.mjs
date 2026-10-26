@@ -29,8 +29,8 @@ async function main() {
     const entry = makeEvent({ session_id: input.session_id, prompt_id: input.prompt_id,
       prompt: input.prompt, last_assistant_message: input.last_assistant_message }, event === 'Stop' ? 'response' : 'prompt');
     if (!entry) return;
-    await enqueue(entry);
-    const token = await loadToken(config.device);
+    await enqueue(entry, config);
+    const token = await loadToken(config);
     await flush(config, token, { deadline, max: 50 });
     return;
   }
@@ -38,7 +38,7 @@ async function main() {
     ? [`HMP: get_context_packet を呼ぶときは session_id=${input.session_id} を渡す`] : [];
   try {
     const config = await loadConfig();
-    const token = await loadToken(config.device);
+    const token = await loadToken(config);
     if (!token) return;
     try { await flush(config, token, { deadline: Math.min(deadline, Date.now() + 1800), max: 200 }); } catch {}
     const remote = await request(config, token, '/api/client/config', { deadline });

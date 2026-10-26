@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, writeFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fixture } from './helpers.mjs';
+import { fixture, workerInit, workerSuccess, successfulClaude } from './helpers.mjs';
 import { validateConfig, validateMcp, loadToken } from '../plugins/hmp/scripts/config.mjs';
 
 test('config accepts HTTPS/loopback, refuses unsafe URLs and devices', () => {
@@ -15,15 +15,20 @@ test('config accepts HTTPS/loopback, refuses unsafe URLs and devices', () => {
   assert.deepEqual(validateMcp({ mcpServers: { hmp: { url: 'https://hmp.example/mcp', type: 'http' } } }, config),
     { mcpServers: { hmp: { type: 'http', url: 'https://hmp.example/mcp' } } });
   assert.throws(() => validateMcp({ mcpServers: { hmp: { type: 'http', url: 'https://hmp.example/mcp', headersHelper: 'false' } } }, config));
+  assert.throws(() => validateMcp({ mcpServers: { hmp: { type: 'http', url: 'https://hmp.example/mcp', headers: { Authorization: 'Bearer synthetic' } } } }, config));
 });
 test('token source is keychain only on macOS, environment only elsewhere', async () => {
   let calls = [];
   const run = async (...args) => { calls.push(args); return { stdout: 'synthetic\n' }; };
-  assert.equal(await loadToken('mock-device', { platform: 'darwin', run, env: { HMP_CLIENT_TOKEN: 'other' } }), 'synthetic');
-  assert.deepEqual(calls[0].slice(0, 2), ['security', ['find-generic-password', '-s', 'hmp-client', '-a', 'mock-device', '-w']]);
-  assert.equal(await loadToken('mock-device', { platform: 'darwin', run: async () => { throw Error(); }, env: { HMP_CLIENT_TOKEN: 'other' } }), null);
+  const config = { device: 'mock-device', instance_url: 'https://synthetic.example' };
+  const lookup = async account => account === 'mock-device@synthetic.example' ? { origin: config.instance_url } : null;
+  assert.equal(await loadToken(config, { platform: 'darwin', run, lookup, env: { HMP_CLIENT_TOKEN: 'other' } }), 'synthetic');
+  assert.deepEqual(calls[0].slice(0, 2), ['security', ['find-generic-password', '-s', 'hmp-client', '-a', 'mock-device@synthetic.example', '-w']]);
+  assert.equal(await loadToken(config, { platform: 'darwin', lookup, run: async () => { throw Error(); }, env: { HMP_CLIENT_TOKEN: 'other' } }), null);
   calls = [];
-  assert.equal(await loadToken('mock-device', { platform: 'linux', run, env: { HMP_CLIENT_TOKEN: 'synthetic' } }), 'synthetic');
+  assert.equal(await loadToken(config, { platform: 'linux', run, env: { HMP_CLIENT_TOKEN: 'synthetic', HMP_CLIENT_ORIGIN: config.instance_url } }), 'synthetic');
+  assert.equal(await loadToken(config, { platform: 'linux', run, env: { HMP_CLIENT_TOKEN: 'synthetic' } }), null);
+  assert.equal(await loadToken(config, { platform: 'linux', run, env: { HMP_CLIENT_TOKEN: 'synthetic', HMP_CLIENT_ORIGIN: 'https://other.example' } }), null);
   assert.equal(calls.length, 0);
 });
 test('setup backs up, records diff/rollback, verifies bytes and instance label; restore works', async t => {
@@ -32,14 +37,50 @@ test('setup backs up, records diff/rollback, verifies bytes and instance label; 
   const result = await f.run('manage.mjs', ['setup', 'https://synthetic.example', 'new-device']);
   assert.equal(result.code, 0);
   const record = JSON.parse(result.stdout); assert.equal(record.verified, true);
+  assert.deepEqual(record.keychain_command, ['security', 'add-generic-password', '-s', 'hmp-client', '-a', 'new-device@synthetic.example', '-w']);
   assert.deepEqual((await f.read(record.backup))['config.json'], before);
   assert.ok(record.restore.includes('restore'));
   const id = record.backup.split('/')[1].replace('.json', '');
   assert.equal((await stat(join(f.home, '.hmp', record.backup))).mode & 0o777, 0o600);
   assert.equal((await f.run('manage.mjs', ['restore', id])).code, 0);
   assert.deepEqual(await f.read('config.json'), before);
-  const verified = await f.run('manage.mjs', ['verify']); assert.equal(verified.code, 0);
+  const verified = await f.run('manage.mjs', ['verify']); assert.equal(verified.code, 0, verified.stderr);
   assert.equal(JSON.parse(verified.stdout).instance_label, '合成テスト用 HMP');
+  assert.deepEqual(JSON.parse(verified.stdout).worker, { ready: true, server: 'hmp', url: f.url + '/mcp' });
+});
+test('verify uses worker credentials/config isolation and removes its temporary working directory', async t => {
+  const f = await fixture(t, { claude: `const fs = require('node:fs');
+fs.writeFileSync(process.env.HOME + '/probe.json', JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), env: process.env }));
+${successfulClaude}` });
+  f.env.CLAUDE_CONFIG_DIR = join(f.home, 'synthetic-claude-config');
+  f.env.HMP_EXTRACTOR_TOKEN = 'synthetic-extractor-token';
+  f.env.ANTHROPIC_API_KEY = 'synthetic-provider-override';
+  const result = await f.run('manage.mjs', ['verify']);
+  assert.equal(result.code, 0, JSON.stringify({ stderr: result.stderr, requests: f.requests.map(request => request.url) }));
+  const { readFile } = await import('node:fs/promises');
+  const probe = JSON.parse(await readFile(join(f.home, 'probe.json'), 'utf8'));
+  assert.equal(probe.args[probe.args.indexOf('--mcp-config') + 1], join(f.home, '.hmp/mcp.json'));
+  assert.equal(probe.env.CLAUDE_CONFIG_DIR, f.env.CLAUDE_CONFIG_DIR);
+  for (const key of ['HMP_CLIENT_TOKEN', 'HMP_EXTRACTOR_TOKEN', 'ANTHROPIC_API_KEY']) assert.equal(key in probe.env, false);
+  assert.equal(probe.args.includes('--allowedTools'), false);
+  await assert.rejects(stat(probe.cwd), { code: 'ENOENT' });
+  await assert.rejects(stat(join(f.home, '.hmp/worker-usage.json')), { code: 'ENOENT' });
+  assert.deepEqual(f.requests.map(x => x.url), ['/api/client/config']);
+});
+test('verify fails closed for missing OAuth, missing tools, model login errors and tool attempts', async t => {
+  const cases = [
+    [{ ...workerInit, mcp_servers: [{ name: 'hmp', status: 'needs-auth' }] }, workerSuccess],
+    [{ ...workerInit, tools: workerInit.tools.slice(1) }, workerSuccess],
+    [workerInit, { ...workerSuccess, subtype: 'error_during_execution', is_error: true, result: 'synthetic-secret' }],
+    [workerInit, { type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', name: 'mcp__hmp__claim_extraction', id: 'synthetic' } } }, workerSuccess],
+    [],
+  ];
+  for (const events of cases) {
+    const f = await fixture(t, { claude: `process.stdout.write(${JSON.stringify(events.map(x => JSON.stringify(x)).join('\n') + '\n')});` });
+    const result = await f.run('manage.mjs', ['verify']);
+    assert.equal(result.code, 1);
+    assert.equal(result.stdout, ''); assert.ok(!result.stderr.includes('synthetic-secret'));
+  }
 });
 test('setup never backs up unknown secret fields', async t => {
   const f = await fixture(t);
@@ -55,7 +96,7 @@ test('pause and resume record changes, status returns only metadata', async t =>
   assert.equal((await f.run('manage.mjs', ['pause', '0'])).code, 0);
   assert.ok(Date.parse((await f.read('pause')).until) <= Date.now());
   const status = await f.run('manage.mjs', ['status']); assert.equal(status.code, 0);
-  assert.deepEqual(JSON.parse(status.stdout), { client_version: '0.1.0', spool: 0, last_send: null, pending: { extraction: 4, lines: 2 } });
+  assert.deepEqual(JSON.parse(status.stdout), { client_version: '0.1.0', spool: 0, spool_held: 0, last_send: null, pending: { extraction: 4, lines: 2 } });
 });
 async function history(f) {
   const dir = join(f.home, '.claude/projects/synthetic-project'); await mkdir(dir, { recursive: true });
@@ -91,6 +132,18 @@ test('onboard rechecks source exclusion after approval preview and never queues 
   const f = await fixture(t); await history(f);
   const plan = JSON.parse((await f.run('onboard.mjs', ['preview', '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z'])).stdout);
   await writeFile(join(f.project, '.hmp-ignore'), '');
+  assert.equal((await f.run('onboard.mjs', ['send', plan.plan, String(plan.count), '--approved'])).code, 1);
+  assert.equal(f.requests.length, 0); assert.equal((await f.names('spool')).length, 0);
+});
+test('onboard rejects plans created for another origin or without origin metadata', async t => {
+  const f = await fixture(t); await history(f);
+  const plan = JSON.parse((await f.run('onboard.mjs', ['preview', '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z'])).stdout);
+  const stored = await f.read(`onboard/${plan.plan}.json`);
+  assert.equal(stored.instance_origin, f.url);
+  await f.run('manage.mjs', ['setup', f.url.replace('127.0.0.1', 'localhost'), 'synthetic-device']);
+  assert.equal((await f.run('onboard.mjs', ['send', plan.plan, String(plan.count), '--approved'])).code, 1);
+  await f.run('manage.mjs', ['setup', f.url, 'synthetic-device']);
+  delete stored.instance_origin; await f.write(`onboard/${plan.plan}.json`, stored);
   assert.equal((await f.run('onboard.mjs', ['send', plan.plan, String(plan.count), '--approved'])).code, 1);
   assert.equal(f.requests.length, 0); assert.equal((await f.names('spool')).length, 0);
 });
