@@ -246,3 +246,10 @@ test('POST beyond the remaining deadline retains its batch; next run replays wit
   assert.equal((await f.names('spool')).length, 0);
   assert.equal((await f.names('sent')).length, 21); assert.equal(f.seen.size, 21);
 });
+test('SessionStart waits beyond 750 ms for config within the hook deadline', async t => {
+  const f = await fixture(t, { remote: { pending: { extraction: 3, lines: 0 }, limits: { max_runs_per_day: 0 } } });
+  f.state.delayMs = 1200;
+  const started = Date.now(); sessionContext(await f.hook('SessionStart'));
+  assert.ok(Date.now() - started < 4000);
+  assert.deepEqual((await f.read('server-config.json')).pending, { extraction: 3, lines: 0 });
+});
