@@ -1,9 +1,10 @@
 import { isOffrecord } from './offrecord.mjs';
 import { pathToFileURL } from 'node:url';
-import { loadConfig, loadToken, validateConfig, validateMcp, CLIENT_VERSION } from './config.mjs';
-import { readJSON, writeJSON, pathFor, filesIn } from './state.mjs';
+import { loadConfig, loadToken, validateConfig, validateMcp, bindCredentials, CLIENT_VERSION } from './config.mjs';
+import { readJSON, writeJSON, pathFor } from './state.mjs';
 import { manual, request } from './client.mjs';
-import { redact } from './events.mjs';
+import { redact, spoolStatus } from './events.mjs';
+import { verifyWorker } from './worker.mjs';
 
 export async function changeFiles(changes) {
   for (const [name, value] of Object.entries(changes)) {
@@ -37,6 +38,10 @@ export async function changeFiles(changes) {
   const record = { backup, diff: Object.keys(changes).map(name => ({ file: name, before: before[name], after: changes[name] })),
     restore: `node "\${CLAUDE_PLUGIN_ROOT}/scripts/manage.mjs" restore ${id}`, verified: false };
   await writeJSON(pathFor(`changes/${id}.json`), record, true);
+  if (changes['config.json']) {
+    record.keychain = await bindCredentials(before['config.json'], changes['config.json']);
+    record.keychain_command = ['security', 'add-generic-password', '-s', record.keychain.service, '-a', record.keychain.account, '-w'];
+  }
   for (const [name, value] of Object.entries(changes)) await writeJSON(pathFor(name), value);
   for (const [name, value] of Object.entries(changes)) {
     if (JSON.stringify(await readJSON(pathFor(name))) !== JSON.stringify(value)) throw Error('verification_failed');
@@ -57,18 +62,19 @@ export async function manage(args) {
     return changeFiles({ pause: { until: new Date(Date.now() + Number(rest[0]) * 60_000).toISOString() } });
   }
   if (command === 'verify') {
-    const config = await loadConfig(), token = await loadToken(config.device);
+    const config = await loadConfig(), token = await loadToken(config);
     const remote = await request(config, token, '/api/client/config', manual());
     const label = typeof remote.instance_label === 'string' ? remote.instance_label : '';
-    return { instance_label: redact(label.split(token).join('<SECRET>')).replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, 80), connected: true };
+    const worker = await verifyWorker();
+    return { instance_label: redact(label.split(token).join('<SECRET>')).replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, 80), connected: true, worker };
   }
   if (command === 'status') {
     if (rest.length && await isOffrecord(rest[0])) return { client_version: CLIENT_VERSION, offrecord: true, notice: 'このセッションはオフレコ' };
     const last = await readJSON(pathFor('last-send.json')).catch(e => { if (e.code === 'ENOENT') return null; throw e; });
     let pending = null;
-    const config = await loadConfig(), token = await loadToken(config.device);
+    const config = await loadConfig(), token = await loadToken(config);
     try { pending = (await import('./client.mjs')).serverSummary(await request(config, token, '/api/client/config', manual())).pending; } catch {}
-    return { client_version: CLIENT_VERSION, spool: (await filesIn('spool')).filter(x => /^[a-f0-9]{64}\.json$/.test(x)).length,
+    return { client_version: CLIENT_VERSION, ...await spoolStatus(config),
       last_send: last?.sent_at ?? null, pending };
   }
   if (command === 'restore') {
@@ -88,5 +94,14 @@ export async function manage(args) {
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   manage(process.argv.slice(2)).then(result => process.stdout.write(JSON.stringify(result) + '\n'))
-    .catch(() => { process.stderr.write('HMP: 設定または接続を確認してください（詳細・秘密は表示しません）。\n'); process.exitCode = 1; });
+    .catch(error => {
+      if (error.message === 'credential_origin_conflict') {
+        process.stderr.write('HMP: 同じ keychain account は別 origin に再利用できません。新しい端末名で setup してください。\n');
+        process.exitCode = 1; return;
+      }
+      process.stderr.write(process.argv[2] === 'verify'
+        ? 'HMP: client 接続、Claude Code 2.1.309 以上でのログイン、同じ設定の hmp の /mcp 認証を確認してください（詳細・秘密は表示しません）。\n'
+        : 'HMP: 設定または接続を確認してください（詳細・秘密は表示しません）。\n');
+      process.exitCode = 1;
+    });
 }

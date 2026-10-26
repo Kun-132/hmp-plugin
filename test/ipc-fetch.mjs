@@ -11,7 +11,7 @@ if (process.send) {
     const abort = () => { finish(); reject(Error('aborted')); };
     if (options.signal?.aborted) { abort(); return; }
     process.on('message', receive); options.signal?.addEventListener('abort', abort, { once: true });
-    process.send({ type: 'test_http', id, method: options.method ?? 'GET', url, body: options.body ?? '' });
+    process.send({ type: 'test_http', id, method: options.method ?? 'GET', url, body: options.body ?? '', headers: options.headers ?? {} });
   });
   // The pending HTTP listener keeps the port alive only while a request is in flight.
   process.channel.unref();

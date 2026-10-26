@@ -13,6 +13,7 @@ export async function preview(from, to) {
   const start = Date.parse(from), end = Date.parse(to);
   if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) throw Error('invalid_period');
   if (await suppressed(process.cwd())) throw Error('paused_or_excluded');
+  const config = await loadConfig();
   const directory = join(homedir(), '.claude', 'projects');
   const canonical = await realpath(directory);
   const events = [];
@@ -61,7 +62,7 @@ export async function preview(from, to) {
   const id = randomUUID();
   const unique = [...new Map(events.map(event => [event.client_event_id, event])).values()];
   await writeJSON(pathFor(`onboard/${id}.json`), { from: new Date(start).toISOString(), to: new Date(end).toISOString(),
-    sourceDirectories: [...sourceDirectories], events: unique }, true);
+    instance_origin: config.instance_url, sourceDirectories: [...sourceDirectories], events: unique }, true);
   return { plan: id, from: new Date(start).toISOString(), to_exclusive: new Date(end).toISOString(), count: unique.length };
 }
 export async function send(plan, confirmedCount) {
@@ -70,9 +71,11 @@ export async function send(plan, confirmedCount) {
   const data = JSON.parse(await readText(pathFor(`onboard/${plan}.json`), 64 * 1024 * 1024));
   if (String(data.events.length) !== confirmedCount) throw Error('count_changed');
   for (const cwd of data.sourceDirectories) if (await suppressed(cwd)) throw Error('source_now_excluded');
-  const config = await loadConfig(), token = await loadToken(config.device);
+  const config = await loadConfig();
+  if (data.instance_origin !== config.instance_url) throw Error('plan_origin_changed');
+  const token = await loadToken(config);
   if (!token) throw Error('no_token');
-  for (const event of data.events) await enqueue(event);
+  for (const event of data.events) await enqueue(event, config);
   await flush(config, token, { deadline: Date.now() + 30_000, max: data.events.length });
   return { queued: data.events.length, period: { from: data.from, to: data.to } };
 }
