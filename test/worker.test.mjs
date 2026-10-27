@@ -178,7 +178,7 @@ if (process.argv.includes(${JSON.stringify(LINE_TOOLS[0])})) {
 test('runClaude distinguishes missing stage tools from connection and execution failures', async t => {
   const f = await fixture(t, { claude: `process.stdout.write(${JSON.stringify(JSON.stringify(extractionWorkerInit) + '\n')}); setTimeout(() => {}, 30000);` });
   const result = await runClaude(f.project, LINE_TOOLS[0], 2000, { binary: join(f.bin, 'claude') });
-  assert.deepEqual(result, { status: 'stage_unavailable', lines: false, submits: 0 });
+  assert.deepEqual(result, { status: 'stage_unavailable', reason: 'tools_missing', lines: false, submits: 0 });
 });
 test('daily and lower item limits hold, zero prevents launch', async t => {
   const f = await fixture(t, { claude: launchLog });
@@ -241,7 +241,45 @@ setTimeout(() => fs.writeFileSync(p.join(process.env.HOME,'escaped'), 'synthetic
 test('wall-clock timeout kills process group without output', async t => {
   const f = await fixture(t, { claude: 'setTimeout(() => {}, 30000);' });
   const result = await runClaude(f.project, TOOLS[0], 50, { binary: join(f.bin, 'claude') });
-  assert.deepEqual(result, { status: 'failed', lines: false, submits: 0 });
+  assert.deepEqual(result, { status: 'failed', reason: 'timeout', lines: false, submits: 0 });
+});
+test('runClaude returns fixed reasons without stream bodies, tool IDs or child errors', async t => {
+  const f = await fixture(t);
+  const privateText = 'SYNTHETIC_PRIVATE_BODY_ID_SECRET';
+  const emit = events => `process.stdout.write(${JSON.stringify(events.map(event => JSON.stringify(event)).join('\n') + '\n')});`;
+  const tool = (name, id = privateText, input = {}) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', name, id, input }] } });
+  const init = { ...workerInit, session_id: privateText };
+  const cases = [
+    ['not_connected', emit([{ ...init, mcp_servers: [{ name: 'hmp', status: 'needs-auth', error: privateText }] }])],
+    ['not_connected', emit([{ ...init, mcp_server_errors: [privateText] }])],
+    ['not_connected', emit([workerSuccess])],
+    ['tools_missing', emit([{ ...init, tools: [] }])],
+    ['forbidden_tool', emit([init, tool('Bash')])],
+    ['invalid_tool_id', emit([init, tool(TOOLS[0]), tool(TOOLS[1])])],
+    ['claim_limit', emit([init, tool(TOOLS[0]), tool(TOOLS[0], 'second')])],
+    ['submit_limit', emit([init, ...Array.from({ length: 4 }, (_, i) => tool(TOOLS[1], String(i)))])],
+    ['forbidden_read', emit([init, tool('Read', privateText, { file_path: '/' + privateText })])],
+    ['verification_tool_call', emit([init, tool(TOOLS[0])]), { verify: true }],
+    ['stream_invalid', `process.stdout.write(${JSON.stringify(privateText + '\n')});`],
+    ['result_failed', emit([init, { ...workerSuccess, subtype: 'error_during_execution', result: privateText }])],
+    ['result_failed', emit([init, { ...workerSuccess, is_error: true, result: privateText }])],
+    ['result_missing', emit([init])],
+    ['exit_failed', emit([init, workerSuccess]) + 'process.exitCode = 1;'],
+    ['timeout', 'setTimeout(() => {}, 30000);', {}, 50],
+    ['output_limit', `process.stdout.write(${JSON.stringify(privateText)}.repeat(1024 * 1024));`],
+    ['spawn_failed', '', { binary: join(f.bin, privateText) }],
+    ['spawn_failed', '', { binary: privateText + '\0' }],
+  ];
+  for (const [reason, script, options = {}, timeout = 2000] of cases) {
+    await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\nprocess.stderr.write(${JSON.stringify(privateText)});\n${script}`, { mode: 0o700 });
+    const result = await runClaude(f.project, TOOLS[0], timeout, { binary: join(f.bin, 'claude'), ...options });
+    assert.equal(result.status, reason === 'tools_missing' ? 'stage_unavailable' : 'failed', reason);
+    assert.equal(result.reason, reason);
+    assert.deepEqual(Object.keys(result).sort(), ['lines', 'reason', 'status', 'submits']);
+    assert.ok(!JSON.stringify(result).includes(privateText), reason);
+  }
+  await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\n${successfulClaude}`, { mode: 0o700 });
+  assert.deepEqual(await runClaude(f.project, TOOLS[0], 2000, { binary: join(f.bin, 'claude') }), { status: 'ok', lines: true, submits: 0 });
 });
 test('SessionStart pending launches detached worker using only sanitized cached config', async t => {
   const f = await fixture(t, { claude: launchLog,
