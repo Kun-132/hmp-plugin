@@ -12,6 +12,7 @@ import { request, serverSummary } from './client.mjs';
 import { isOffrecord, discardSessionFiles } from './offrecord.mjs';
 import { readyTurns, retryPath, deferTurn, sentencesFor, recordFailure } from './turns.mjs';
 import { claudeEnv, runClaude, ownsWorkerLock, POINT_TOOLS, LINE_TOOLS, supportedVersion } from './worker.mjs';
+import { recordPointsStats } from './points-stats.mjs';
 
 export const POINTS_MAXIMUM = Object.freeze({ max_turns_per_day: 300, max_turns_per_run: 10, max_seconds_per_turn: 90 });
 export function pointsLimits(limits = {}) {
@@ -164,7 +165,14 @@ export async function runPointsWorker(config, summary, { remaining = Infinity } 
             client_version: CLIENT_VERSION, device: config.device, turn: ids, sentences, points: result.points, model: 'sonnet',
             usage: { ...result.usage, turn_ended_at: turn.turn_ended_at },
           }, deadline: Date.now() + 8000, timeout: 8000 });
-          if (['accepted', 'already_done'].includes(receipt.status)) await finish();
+          if (['accepted', 'already_done'].includes(receipt.status)) {
+            const accepted_at = Date.now();
+            await finish();
+            // A local metrics failure must not retry a turn HMP already accepted.
+            if (receipt.status === 'accepted') await recordPointsStats(config, {
+              accepted_at, turn_ended_at: turn.turn_ended_at, usage: result.usage, written: receipt.written, dropped: receipt.dropped,
+            }).catch(() => {});
+          }
           else await fail('points_rejected');
         } catch (e) {
           if (e.message === 'client_source_paused') { outcome.stopped = true; return outcome; }

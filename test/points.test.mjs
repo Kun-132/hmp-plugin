@@ -162,6 +162,28 @@ test('already_done completes a turn; other receipt statuses preserve it', async 
   const f = await seed(t); f.state.pointsReceipt = { status: 'turn_skipped', written: 0, dropped: {} };
   ok(await f.run('worker.mjs')); assert.equal((await f.names('turns')).length, 1); assert.equal(await lastCode(f), 'points_rejected');
   f.state.pointsReceipt.status = 'already_done'; await retryNow(f); ok(await f.run('worker.mjs')); assert.equal((await f.names('turns')).length, 0);
+  assert.ok(!(await f.names('.')).includes('points-stats.json'));
+});
+test('each accepted local turn adds numeric stats without text, IDs or sessions', async t => {
+  const f = await seed(t);
+  f.state.pointsReceipt = { status: 'accepted', written: 1, dropped: { duplicate: 2, invalid: 1 }, text: 'SYNTHETIC_PRIVATE' };
+  for (let i = 0; i < 2; i++) {
+    if (i) {
+      await f.write('worker.lock', { pid: process.pid });
+      await f.hook('UserPromptSubmit', { prompt_id: 'later' }); await f.hook('Stop', { prompt_id: 'later' });
+      await rm(join(f.home, '.hmp/worker.lock'));
+    }
+    ok(await f.run('worker.mjs'));
+    const rows = (await f.read('points-stats.json'))[f.url];
+    assert.equal(rows.length, i + 1);
+    const sample = rows.at(-1), submitted = f.requests.filter(r => r.url === '/api/client/points').at(-1).body;
+    assert.ok(sample.accepted_at >= submitted.usage.turn_ended_at);
+    assert.equal(sample.turn_to_accepted_ms, sample.accepted_at - submitted.usage.turn_ended_at);
+    assert.equal(sample.duration_ms, submitted.usage.duration_ms);
+    assert.deepEqual({ ...sample, accepted_at: 0, turn_to_accepted_ms: 0, duration_ms: 0 },
+      { accepted_at: 0, turn_to_accepted_ms: 0, duration_ms: 0, input_tokens: 123, output_tokens: 45, written: 1, dropped: 3 });
+    assert.equal((await stat(join(f.home, '.hmp/points-stats.json'))).mode & 0o777, 0o600);
+  }
 });
 test('offrecord and confirmed forget remove only that session state/turns, across origins', async t => {
   const f = await seed(t); await f.write('worker.lock', { pid: process.pid });
@@ -247,6 +269,7 @@ process.stdout.write(${JSON.stringify(JSON.stringify(success) + '\n')}); }`;
     assert.deepEqual(allowed, allowed[0] === POINT_TOOLS[0] ? POINT_TOOLS : LINE_TOOLS);
   }
   assert.equal((await f.read('points-usage.json')).turns, 4);
+  assert.equal((await f.read('points-stats.json'))[f.url].length, 1);
 });
 test('MCP OAuth failure stays in its stage and cannot block a subsequent local turn', async t => {
   const f = await seed(t);
