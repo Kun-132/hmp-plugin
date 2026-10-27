@@ -20,6 +20,32 @@ async function points(f) {
   await f.write('worker.lock', { pid: process.pid });
 }
 
+for (const value of ['1', '']) {
+  test(`Codex with CLAUDECODE=${JSON.stringify(value)} skips every event without saving or sending`, async t => {
+    const f = await fixture(t); await points(f);
+    f.env.CLAUDECODE = value;
+    const before = await f.names('.');
+    for (const event of events) {
+      quiet(await hook(f, event));
+      assert.equal(f.requests.length, 0);
+      assert.deepEqual(await f.names('.'), before);
+      for (const dir of ['spool', 'sent', 'sessions', 'turns']) {
+        await assert.rejects(stat(join(f.home, '.hmp', dir)), { code: 'ENOENT' });
+      }
+    }
+  });
+}
+test('Claude Code entry still sends and records a turn with CLAUDECODE', async t => {
+  const f = await fixture(t); await points(f);
+  f.env.CLAUDECODE = '1';
+  quiet(await f.hook('UserPromptSubmit'));
+  quiet(await f.hook('Stop'));
+  assert.deepEqual(f.requests.flatMap(r => r.body.events).map(e => [e.kind, e.text]), [
+    ['prompt', '合成の質問'], ['response', '合成の最終回答'],
+  ]);
+  assert.equal((await f.names('turns')).length, 1);
+});
+
 test('Codex payload pairs prompt/response by turn_id, sends both and queues a completed turn', async t => {
   const f = await fixture(t); await points(f);
   quiet(await hook(f, 'UserPromptSubmit', { prompt_id: 'ignored' }));
@@ -189,7 +215,7 @@ async function installation(f, version = 'v1') {
   await mkdir(join(path, 'scripts'), { recursive: true });
   await writeFile(join(path, 'scripts/hook.mjs'), `import { writeFileSync } from 'node:fs';
 let text = ''; for await (const chunk of process.stdin) text += chunk;
-writeFileSync(process.env.HOME + '/probe.json', JSON.stringify({ version: ${JSON.stringify(version)}, args: process.argv.slice(2), text }));`);
+writeFileSync(process.env.HOME + '/probe.json', JSON.stringify({ version: ${JSON.stringify(version)}, args: process.argv.slice(2), text, claudeCode: process.env.CLAUDECODE ?? null }));`);
   return path;
 }
 async function registry(f, path) {
@@ -204,12 +230,21 @@ test('stable launcher follows registry updates, forwards stdin and Codex argumen
     const path = await installation(f, version); await registry(f, path);
     quiet(await launcher(f, 'Stop'));
     assert.deepEqual(JSON.parse(await readFile(join(f.home, 'probe.json'), 'utf8')), {
-      version, args: ['Stop', 'codex'], text: '{"prompt":"synthetic stdin"}',
+      version, args: ['Stop', 'codex'], text: '{"prompt":"synthetic stdin"}', claudeCode: null,
     });
   }
   await rm(join(f.home, 'probe.json'));
   await writeFile(join(f.home, '.claude/plugins/installed_plugins.json'), '{"plugins":{"other@other":[]}}');
   quiet(await launcher(f)); await assert.rejects(stat(join(f.home, 'probe.json')), { code: 'ENOENT' });
+});
+test('stable launcher inherits CLAUDECODE when spawning the installed hook', async t => {
+  const f = await fixture(t); success(await manage(f, 'install'));
+  await registry(f, await installation(f));
+  for (const value of ['1', '']) {
+    f.env.CLAUDECODE = value;
+    quiet(await launcher(f));
+    assert.equal(JSON.parse(await readFile(join(f.home, 'probe.json'), 'utf8')).claudeCode, value);
+  }
 });
 for (const mode of ['outside', 'prefix-sibling', 'directory-link', 'file-link', 'registry-link', 'cache-link', 'missing']) {
   test(`stable launcher refuses ${mode}`, async t => {
