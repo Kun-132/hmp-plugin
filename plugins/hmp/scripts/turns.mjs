@@ -127,7 +127,7 @@ export async function turnStatus(config) {
     last_failure: FAILURE_CODES.includes(failure?.code) ? failure.code : null };
 }
 export const MCP_FAILURE_CODES = Object.freeze(['mcp_config_invalid', 'mcp_version_failed', 'mcp_version_unsupported',
-  'mcp_not_connected', 'mcp_tools_missing', 'mcp_forbidden_tool', 'mcp_invalid_tool_id', 'mcp_claim_limit', 'mcp_submit_limit',
+  'mcp_not_connected', 'mcp_tools_missing', 'mcp_tools_unexpected', 'mcp_forbidden_tool', 'mcp_invalid_tool_id', 'mcp_claim_limit', 'mcp_submit_limit',
   'mcp_forbidden_read', 'mcp_verification_tool_call', 'mcp_stream_invalid', 'mcp_timeout', 'mcp_result_failed',
   'mcp_result_missing', 'mcp_exit_failed', 'mcp_spawn_failed', 'mcp_output_limit', 'mcp_interrupted']);
 export const FAILURE_CODES = Object.freeze(['stale_lock_cleared', 'events_unavailable', 'capture_pending', 'contract_invalid', 'claude_failed',

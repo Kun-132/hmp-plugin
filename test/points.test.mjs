@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, writeFile, stat, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fixture } from './helpers.mjs';
+import { fixture, mcpEvents } from './helpers.mjs';
 import { AUTOMATED_PREFIXES, sentencesFor } from '../plugins/hmp/scripts/turns.mjs';
 import { POINTS_MAXIMUM, pointsLimits, pointsArgs, runPointsClaude, validateOutput } from '../plugins/hmp/scripts/points-worker.mjs';
 import { POINT_TOOLS, LINE_TOOLS, claudeArgs, createStreamGuard } from '../plugins/hmp/scripts/worker.mjs';
@@ -25,6 +25,7 @@ process.stdin.on('end', () => { fs.writeFileSync(process.env.HOME + '/points-inp
 const ok = r => { assert.equal(r.code, 0, r.stderr); assert.equal(r.stderr, ''); return r.stdout ? JSON.parse(r.stdout) : null; };
 async function cached(f, limits = {}, pending = {}) {
   await f.write('server-config.json', { instance_origin: f.url, points: { ...contract, limits }, pending });
+  await f.write('mcp-tools.json', { [f.url]: [...POINT_TOOLS, ...LINE_TOOLS] });
 }
 async function seed(t, options = {}) {
   const f = await fixture(t, { claude: fake, ...options });
@@ -279,8 +280,8 @@ test('pending server work runs only after local turns, points before lines, with
   const script = `if (process.argv.includes('--version')) { process.stdout.write('2.1.309'); process.exit(0); }
 if (process.argv.includes('--json-schema')) { ${fake} } else {
 const fs = require('node:fs'); fs.appendFileSync(process.env.HOME + '/points-launches.jsonl', JSON.stringify({ args: process.argv.slice(2), env: process.env }) + '\\n');
-process.stdout.write(${JSON.stringify(JSON.stringify(init) + '\n')});
-const name = process.argv.includes(${JSON.stringify(POINT_TOOLS[0])}) ? ${JSON.stringify(POINT_TOOLS[1])} : ${JSON.stringify(LINE_TOOLS[1])};
+${mcpEvents([init])}
+const name = process.argv[process.argv.indexOf('--allowedTools') + 1] === ${JSON.stringify(POINT_TOOLS[0])} ? ${JSON.stringify(POINT_TOOLS[1])} : ${JSON.stringify(LINE_TOOLS[1])};
 process.stdout.write(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'submit', name, input: {} }] } }) + '\\n');
 process.stdout.write(${JSON.stringify(JSON.stringify(success) + '\n')}); }`;
   await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\n${script}`, { mode: 0o700 });
@@ -292,11 +293,11 @@ process.stdout.write(${JSON.stringify(JSON.stringify(success) + '\n')}); }`;
   assert.deepEqual(calls.slice(1).map(c => c.args[c.args.indexOf('--allowedTools') + 1]), [POINT_TOOLS[0], POINT_TOOLS[0], LINE_TOOLS[0]]);
   for (const c of calls.slice(1)) {
     assert.equal(c.args[c.args.indexOf('--tools') + 1], ''); assert.equal(c.args[c.args.indexOf('--model') + 1], 'sonnet');
-    const allowed = c.args.slice(c.args.indexOf('--allowedTools') + 1, c.args.indexOf('--permission-mode'));
+    const allowed = c.args.slice(c.args.indexOf('--allowedTools') + 1, c.args.indexOf('--disallowedTools'));
     assert.deepEqual(allowed, allowed[0] === POINT_TOOLS[0] ? POINT_TOOLS : LINE_TOOLS);
   }
   assert.equal((await f.read('points-usage.json')).turns, 4);
-  assert.equal((await f.read('points-stats.json'))[f.url].length, 1);
+  assert.equal((await f.read('points-stats.json'))[f.url].length, 4);
 });
 test('MCP OAuth failure stays in its stage and cannot block a subsequent local turn', async t => {
   const f = await seed(t);
@@ -338,7 +339,7 @@ test('MCP preflight failures reach status as fixed codes without CLI or config c
 });
 test('points and line MCP stages persist runClaude stop reasons without body, IDs or secrets', async t => {
   const privateText = 'SYNTHETIC_PRIVATE_BODY_ID_SECRET';
-  const emit = events => `process.stdout.write(${JSON.stringify(events.map(event => JSON.stringify(event)).join('\n') + '\n')});`;
+  const emit = mcpEvents;
   const tool = (name, id = privateText) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', name, id, input: { text: privateText } }] } });
   const init = { type: 'system', subtype: 'init', session_id: privateText,
     mcp_servers: [{ name: 'hmp', status: 'connected' }], tools: [...POINT_TOOLS, ...LINE_TOOLS] };
@@ -488,8 +489,8 @@ test('R2: identical answers with different human prompts close distinct turns', 
 
 const mcpFake = `const fs = require('node:fs');
 fs.appendFileSync(process.env.HOME + '/points-launches.jsonl', JSON.stringify({ args: process.argv.slice(2) }) + '\\n');
-process.stdout.write(${JSON.stringify(JSON.stringify({ type: 'system', subtype: 'init', mcp_servers: [{ name: 'hmp', status: 'connected' }], tools: [...POINT_TOOLS, ...LINE_TOOLS] }) + '\n')});
-const name = process.argv.includes('${POINT_TOOLS[0]}') ? '${POINT_TOOLS[1]}' : '${LINE_TOOLS[1]}';
+${mcpEvents([{ type: 'system', subtype: 'init', mcp_servers: [{ name: 'hmp', status: 'connected' }], tools: [...POINT_TOOLS, ...LINE_TOOLS] }])}
+const name = process.argv[process.argv.indexOf('--allowedTools') + 1] === '${POINT_TOOLS[0]}' ? '${POINT_TOOLS[1]}' : '${LINE_TOOLS[1]}';
 process.stdout.write(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'submit', name, input: {} }] } }) + '\\n');
 process.stdout.write(${JSON.stringify(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }) + '\n')});`;
 test('R3: MCP uses only backlog and lines freshly fetched in this worker, failing closed', async t => {

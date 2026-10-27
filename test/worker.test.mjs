@@ -129,6 +129,7 @@ test('worker enforces 8 items despite inflated remote limits/tools, strips crede
     Array.from({ length: 8 }, (_, i) => i % 2 ? LINE_TOOLS[0] : EXTRACTION_TOOLS[0]));
   for (const launch of launches) {
     assert.equal(launch.credential, false); assert.equal(launch.extra, false);
+    assert.equal(launch.args.includes('--disallowedTools'), false);
     // A large claim stays inline: a spilled result lives outside the read fence and would stop the worker.
     assert.equal(launch.mcpOutput, String(MCP_OUTPUT_TOKENS)); assert.equal(launch.largeFiles, undefined);
     assert.notEqual(launch.cwd, f.project); assert.ok(launch.cwd.includes('hmp-worker-'));
@@ -137,6 +138,8 @@ test('worker enforces 8 items despite inflated remote limits/tools, strips crede
     assert.deepEqual(allowedTools(launch.args), [...stage, `Read(/${launch.cwd}/**)`]);
   }
   assert.equal((await f.read('worker-usage.json')).runs, 1);
+  assert.equal((await f.names('.')).includes('mcp-tools.json'), false);
+  assert.equal((await f.names('.')).includes('points-stats.json'), false);
   await assert.rejects(stat(join(f.home, '.hmp/worker.lock')), { code: 'ENOENT' });
 });
 test('extraction-only init skips every line launch and fills the item limit with extractions', async t => {

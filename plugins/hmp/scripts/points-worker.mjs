@@ -11,8 +11,9 @@ import { flush, spoolFilename } from './events.mjs';
 import { request, serverSummary } from './client.mjs';
 import { isOffrecord, discardSessionFiles } from './offrecord.mjs';
 import { readyTurns, retryPath, deferTurn, sentencesFor, recordFailure, MCP_FAILURE_CODES } from './turns.mjs';
-import { claudeEnv, runClaude, ownsWorkerLock, POINT_TOOLS, LINE_TOOLS, supportedVersion } from './worker.mjs';
-import { recordPointsStats } from './points-stats.mjs';
+import { claudeEnv, ownsWorkerLock, POINT_TOOLS, LINE_TOOLS, supportedVersion } from './worker.mjs';
+import { runMcpClaude } from './mcp-tools.mjs';
+import { recordPointsStats, recordMcpStats } from './points-stats.mjs';
 
 export const POINTS_MAXIMUM = Object.freeze({ max_turns_per_day: 300, max_turns_per_run: 10, max_seconds_per_turn: 90 });
 export function pointsLimits(limits = {}) {
@@ -209,7 +210,8 @@ export async function runPointsWorker(config, summary, { remaining = Infinity } 
             if (!await allowed()) return outcome;
             if (!await reserve()) return outcome;
             progressed = true;
-            const result = await runClaude(directory, stage.tools[0], limits.max_seconds_per_turn * 1000, { mcpOnly: true });
+            const result = await runMcpClaude(config, directory, stage.tools, limits.max_seconds_per_turn * 1000);
+            if (result.status === 'ok') await recordMcpStats(config, result.usage).catch(() => {});
             if (result.status !== 'ok') {
               const code = 'mcp_' + result.reason;
               await recordFailure(config, MCP_FAILURE_CODES.includes(code) ? code : 'mcp_failed'); stage.stopped = true;

@@ -12,6 +12,10 @@ function reasonCounts(value) {
     && code.length <= 64 && count(n)));
 }
 function pointRow(value) {
+  if (value?.path === 'mcp') {
+    const row = numericRow(value, ['at', 'duration_ms'], tokenFields);
+    return row ? { path: 'mcp', ...row } : null;
+  }
   const row = numericRow(value, ['accepted_at', 'turn_to_accepted_ms', 'duration_ms', 'written', 'dropped'], tokenFields);
   if (row && value.dropped_by_reason) row.dropped_by_reason = reasonCounts(value.dropped_by_reason);
   return row;
@@ -35,18 +39,26 @@ export async function recordPointsStats(config, { accepted_at, turn_ended_at, us
     dropped_by_reason: reasonCounts(dropped) });
   if (row) await append('points-stats.json', config.instance_url, row, pointRow, 500);
 }
+export async function recordMcpStats(config, usage, at = Date.now()) {
+  const row = pointRow({ path: 'mcp', at, duration_ms: usage?.duration_ms,
+    ...Object.fromEntries(tokenFields.map(key => [key, usage?.[key]])) });
+  if (row) await append('points-stats.json', config.instance_url, row, pointRow, 500);
+}
 function median(values) {
   if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b), middle = Math.floor(sorted.length / 2);
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
+function usageSummary(rows) {
+  const tokens = key => median(rows.filter(row => count(row[key])).map(row => row[key]));
+  return { count: rows.length, duration_ms_median: tokens('duration_ms'),
+    ...Object.fromEntries(tokenFields.map(key => [key + '_median', tokens(key)])) };
+}
 function summarize(rows) {
   const latency = rows.map(row => row.turn_to_accepted_ms / 1000).sort((a, b) => a - b);
-  const tokens = key => median(rows.filter(row => count(row[key])).map(row => row[key]));
-  return { count: rows.length,
+  return { ...usageSummary(rows),
     turn_to_accepted_seconds: { median: median(latency), p90: latency.length ? latency[Math.ceil(latency.length * 0.9) - 1] : null },
-    input_tokens_median: tokens('input_tokens'), input_total_tokens_median: tokens('input_total_tokens'),
-    output_tokens_median: tokens('output_tokens'), written_median: median(rows.map(row => row.written)),
+    written_median: median(rows.map(row => row.written)),
     dropped: rows.reduce((sum, row) => sum + row.dropped, 0),
     dropped_by_reason: reasonCounts(rows.reduce((totals, row) => {
       for (const [code, n] of Object.entries(row.dropped_by_reason ?? {})) totals[code] = (totals[code] ?? 0) + n;
@@ -55,7 +67,9 @@ function summarize(rows) {
 }
 export async function pointsStats(config, now = Date.now()) {
   const rows = (await histories('points-stats.json', pointRow, 500))[config.instance_url] ?? [];
-  return { last_24h: summarize(rows.filter(row => row.accepted_at >= now - 86400_000 && row.accepted_at <= now)), all: summarize(rows) };
+  const terminal = rows.filter(row => row.path !== 'mcp'), mcp = rows.filter(row => row.path === 'mcp');
+  return { last_24h: summarize(terminal.filter(row => row.accepted_at >= now - 86400_000 && row.accepted_at <= now)), all: summarize(terminal),
+    mcp: { last_24h: usageSummary(mcp.filter(row => row.at >= now - 86400_000 && row.at <= now)), all: usageSummary(mcp) } };
 }
 export async function recordBacklog(config, summary, at = Date.now()) {
   await append('backlog-history.json', config.instance_url,
