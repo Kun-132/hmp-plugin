@@ -58,12 +58,16 @@ export async function filesIn(name) {
     return await readdir(dir);
   } catch (e) { if (e.code === 'ENOENT') return []; throw e; }
 }
-export async function suppressed(cwd) {
+export async function paused() {
   // A malformed pause is fail-closed, including an unreadable file.
   try {
     const pause = await readJSON(pathFor('pause'));
     if (!Number.isFinite(Date.parse(pause.until)) || Date.parse(pause.until) > Date.now()) return true;
   } catch (e) { if (e.code !== 'ENOENT') return true; }
+  return false;
+}
+export async function suppressed(cwd) {
+  if (await paused()) return true;
   if (typeof cwd !== 'string' || !isAbsolute(cwd)) return true;
   // Check both lexical and canonical parents so symlinked projects retain exclusion.
   const { realpath } = await import('node:fs/promises');

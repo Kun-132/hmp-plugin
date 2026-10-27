@@ -19,6 +19,7 @@ export async function setOffrecord(session, enabled) {
   await writeJSON(pathFor(`changes/offrecord-${id}.json`), record, true);
   if (enabled) await writeJSON(path, {}); else await remove(path);
   let discarded = 0;
+  if (enabled) await discardSessionFiles(session);
   if (enabled) for (const name of await filesIn('spool')) {
     if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
     const file = pathFor(`spool/${name}`);
@@ -30,4 +31,16 @@ export async function setOffrecord(session, enabled) {
   await writeJSON(pathFor(`changes/offrecord-${id}.json`), record);
   if (!record.verified) throw Error('verification_failed');
   return { offrecord: enabled, discarded };
+}
+
+export async function discardSessionFiles(session) {
+  for (const dir of ['turns', 'sessions']) for (const name of await filesIn(dir)) {
+    if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+    const file = pathFor(`${dir}/${name}`);
+    const entry = await readJSON(file).catch(() => null);
+    if (entry?.session === session) {
+      await remove(file);
+      if (dir === 'turns') await remove(pathFor('turn-retries/' + name));
+    }
+  }
 }

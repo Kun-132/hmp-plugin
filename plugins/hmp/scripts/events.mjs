@@ -82,8 +82,10 @@ export async function flush(config, token, { deadline = Date.now() + 2400, max =
     if (!Array.isArray(receipt.rejected) || receipt.rejected.length || !Number.isSafeInteger(receipt.accepted) ||
         !Number.isSafeInteger(receipt.duplicates) || receipt.accepted < 0 || receipt.duplicates < 0 ||
         receipt.accepted + receipt.duplicates !== batch.length) return;
-    for (const { name } of batch) {
-      await writeJSON(join(pathFor('sent'), name), { sent_at: new Date().toISOString() });
+    for (const { name, event } of batch) {
+      const capture = receipt.captures?.find(c => c.client_event_id === event.client_event_id);
+      await writeJSON(join(pathFor('sent'), name), { sent_at: new Date().toISOString(),
+        ...(typeof capture?.capture_id === 'string' && capture.capture_id ? { capture_id: capture.capture_id } : {}) });
       await remove(join(pathFor('spool'), name));
     }
     await writeJSON(pathFor('last-send.json'), { sent_at: new Date().toISOString() });
