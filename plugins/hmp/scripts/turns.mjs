@@ -131,7 +131,7 @@ export const MCP_FAILURE_CODES = Object.freeze(['mcp_config_invalid', 'mcp_versi
   'mcp_forbidden_read', 'mcp_verification_tool_call', 'mcp_stream_invalid', 'mcp_timeout', 'mcp_result_failed',
   'mcp_result_missing', 'mcp_exit_failed', 'mcp_spawn_failed', 'mcp_output_limit', 'mcp_interrupted']);
 export const FAILURE_CODES = Object.freeze(['stale_lock_cleared', 'events_unavailable', 'capture_pending', 'contract_invalid', 'claude_failed',
-  'claude_timeout', 'output_invalid', 'points_unavailable', 'points_rejected', 'daily_limit', 'mcp_failed', 'turn_expired', ...MCP_FAILURE_CODES]);
+  'claude_timeout', 'codex_unavailable', 'codex_failed', 'codex_timeout', 'output_invalid', 'points_unavailable', 'points_rejected', 'daily_limit', 'mcp_failed', 'turn_expired', ...MCP_FAILURE_CODES]);
 export async function recordFailure(config, code) {
   if (!FAILURE_CODES.includes(code)) throw Error('invalid_failure');
   await writeJSON(failurePath(config), { code, at: Date.now() });

@@ -100,21 +100,23 @@ claude --strict-mcp-config --mcp-config "$HOME/.hmp/mcp.json" \
 
 処理役は共通の `worker.lock` で端末に1つだけです。先に spool を送信し、送信済みの印から各部分の capture ID を引きます。足りないターンは待ちに残して次へ進みます。文は HMP の `sourceSpans` と同じ規則（`。！？!?`・改行、空白または末尾が続く `.`、900 UTF-16 単位、空白だけを除外）で分割し、部分名と全体の通し番号を付けます。
 
+p0 の端末だけの任意設定: `node "${CLAUDE_PLUGIN_ROOT}/scripts/manage.mjs" engine codex` で端末の1ターン要点処理を Codex に切り替えます（既定は Claude、戻すときは `engine claude` または記録された restore）。配布 instructions・Schema・検査・送信は共通で、閉じた `codex exec` を使い、一時ファイルは処理後に削除確認します。MCP の待ち処理・線と p1〜p3 は Claude のままです。status / verify は現在の engine、status は engine 別の中央値も表示します。
+
 子の起動は `claude -p --model sonnet --tools "" --strict-mcp-config --setting-sources "" --settings '{"disableAllHooks":true,"enabledPlugins":{}}' --no-session-persistence --output-format json --json-schema <output_schema>`。スキル・Chrome も無効にし、固定の system prompt で境界を保ち、抽出基準としての配布 instructions と、信頼できないデータとして囲った番号付きの文だけを標準入力に渡します。ツール・MCP 接続は与えません。子の環境は既存の `claudeEnv()` の許可リストだけで、`ANTHROPIC_API_KEY`・端末トークン・provider の設定は渡しません。
 
-構造化出力を配布 schema と要点の形で検査し、端末トークンで `/api/client/points` に送ります。model は `sonnet`、usage は入力・出力 tokens（CLI が返した場合）、実測の duration_ms、UTC ミリ秒の turn_ended_at です。`accepted` / `already_done` だけで待ちを消します。失敗時は固定コードに加えて、本文なしの試行回数・次回時刻を `turn-retries/` に記録します。5分・30分・2時間・6時間・以後1日の間隔をあけ、待機中のターンを飛ばして後続を処理します。原文の送信済みの印とターンは残し、7日を過ぎたターンは端末の待ちから外して `turn_expired` を記録します。原文と未処理の待ちは HMP 側に残ります。モデルの出力・標準エラーは保存しません。
+構造化出力を配布 schema と要点の形で検査し、端末トークンで `/api/client/points` に送ります。model は Claude なら `sonnet`、Codex なら `codex`、usage は入力・出力 tokens（CLI が返した場合）、実測の duration_ms、UTC ミリ秒の turn_ended_at です。`accepted` / `already_done` だけで待ちを消します。失敗時は固定コードに加えて、本文なしの試行回数・次回時刻を `turn-retries/` に記録します。5分・30分・2時間・6時間・以後1日の間隔をあけ、待機中のターンを飛ばして後続を処理します。原文の送信済みの印とターンは残し、7日を過ぎたターンは端末の待ちから外して `turn_expired` を記録します。原文と未処理の待ちは HMP 側に残ります。モデルの出力・標準エラーは保存しません。
 
-上限は **UTC 1日300件・1回10件・1件90秒**と `points.limits` の小さい方です。0は停止、不正値も0。試行前に `points-usage.json` に数え、失敗でも返却しません。日付が変われば再開します。すぐ処理できる端末の待ちを処理した後、同じ処理役で `/api/client/config` を取り直し、MCP 設定の検査が通り、`points.backlog` または `pending.lines` が1以上なら、`claim_turn` / `submit_points` を先に、その後 `claim_line_job` / `submit_line_blocks` を処理します。この起動も同じ件数・日次・時間の枠を使い、各段の2ツールだけを許して stream を監視します。Read は許しません。config を取り直せないときは MCP を起動しません。HMP の `claim_turn` は30分以上前の記録だけが対象です。空の claim（submit 0回）が出た段は、その処理役では再起動しません。MCP の失敗や OAuth 切れは端末のターン処理を止めません。処理中も待ちを取り直し、解除後の到着には残り予算で1回だけ再起動します。各ターンの Claude 起動前と要点送信前に一時停止・そのセッションのオフレコを再確認します。一時停止では待ちを残し、オフレコではそのセッションの待ちを捨てます。ここでは Hook が確認済みの `.hmp-ignore` を再判定しません。常駐はしません。
+上限は **UTC 1日300件・1回10件・1件90秒**と `points.limits` の小さい方です。0は停止、不正値も0。試行前に `points-usage.json` に数え、失敗でも返却しません。日付が変われば再開します。すぐ処理できる端末の待ちを処理した後、同じ処理役で `/api/client/config` を取り直し、MCP 設定の検査が通り、`points.backlog` または `pending.lines` が1以上なら、`claim_turn` / `submit_points` を先に、その後 `claim_line_job` / `submit_line_blocks` を処理します。この起動も同じ件数・日次・時間の枠を使い、各段の2ツールだけを許して stream を監視します。Read は許しません。config を取り直せないときは MCP を起動しません。HMP の `claim_turn` は30分以上前の記録だけが対象です。空の claim（submit 0回）が出た段は、その処理役では再起動しません。MCP の失敗や OAuth 切れは端末のターン処理を止めません。処理中も待ちを取り直し、解除後の到着には残り予算で1回だけ再起動します。各ターンの実行役の起動前と要点送信前に一時停止・そのセッションのオフレコを再確認します。一時停止では待ちを残し、オフレコではそのセッションの待ちを捨てます。ここでは Hook が確認済みの `.hmp-ignore` を再判定しません。常駐はしません。
 
 ## 設定変更と戻し方
 
-setup・pause は **バックアップ → diff の記録 → 戻し手順の記録 → 変更・読戻し確認** の順に実行します。`~/.hmp/backups/` と `changes/` に秘密を含まない記録を残します。既存設定への復元は表示された `manage.mjs restore <ID>` を使います。新規導入で元ファイルがない場合は自動削除せず、下のアンインストール手順を使います。setup 後の接続確認は client トークン登録と MCP 初回認証の後に verify で行います。account の origin 固定記録は秘密を含まず、restore でも削除・再割当てしません。同じ account が別 origin に移らないようにするためです。
+setup・pause・engine は **バックアップ → diff の記録 → 戻し手順の記録 → 変更・読戻し確認** の順に実行します。`~/.hmp/backups/` と `changes/` に秘密を含まない記録を残します。既存設定への復元は表示された `manage.mjs restore <ID>` を使います。新規導入で元ファイルがない場合は自動削除せず、下のアンインストール手順を使います。setup 後の接続確認は client トークン登録と MCP 初回認証の後に verify で行います。account の origin 固定記録は秘密を含まず、restore でも削除・再割当てしません。同じ account が別 origin に移らないようにするためです。
 
 本人の操作で `/plugin uninstall hmp@hmp-marketplace` → 処理役の終了確認 → `~/.hmp` を削除 → HMP 側で端末トークンを失効 → 必要なら本人が `security delete-generic-password -s hmp-client -a '<account>'`（移行前の旧 account が残っている場合は `<device>` も対象） を実行します。削除前に必要な設定記録を退避してください。
 
 ## 検証・配布前提
 
-`npm test`（node:test）。全テストは一時 HOME・合成会話・偽 security/claude・ループバック HTTP のみで動きます。実 HMP・実会話・実 keychain・実 `~/.claude` は使いません。
+`npm test`（node:test）。全テストは一時 HOME・合成会話・偽 security/claude/codex・ループバック HTTP のみで動きます。実 HMP・実会話・実 keychain・実 `~/.claude` は使いません。
 
 短い実時間制限を検証するため、テストファイルは順次実行します。client keychain のテスト専用 loader は service / account に応じた合成応答を返し、偽実行ファイルの OS 起動遅延による不安定さを避けます。製品コードでは loader を使わず、認証読出し期限350msを維持します。実 CLI の OAuth プローブは一時 HOME の偽 security 実行ファイルを使います。
 

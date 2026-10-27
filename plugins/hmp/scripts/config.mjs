@@ -6,10 +6,11 @@ import { pathFor, readJSON, writeJSON } from './state.mjs';
 export const CLIENT_VERSION = '0.2.0';
 export function validateConfig(value) {
   if (!value || typeof value.instance_url !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value.device ?? '')) throw Error('invalid_config');
+  if (Object.hasOwn(value, 'engine') && !['claude', 'codex'].includes(value.engine)) throw Error('invalid_engine');
   const url = new URL(value.instance_url);
   if (url.username || url.password || url.search || url.hash || url.pathname !== '/' ||
       !(url.protocol === 'https:' || (url.protocol === 'http:' && ['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname)))) throw Error('invalid_url');
-  return { instance_url: url.origin, device: value.device };
+  return { instance_url: url.origin, device: value.device, ...(Object.hasOwn(value, 'engine') ? { engine: value.engine } : {}) };
 }
 export const loadConfig = async () => validateConfig(await readJSON(pathFor('config.json')));
 export function validateMcp(value, config) {

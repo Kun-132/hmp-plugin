@@ -13,7 +13,7 @@ export async function changeFiles(changes) {
   for (const [name, value] of Object.entries(changes)) {
     if (!['config.json', 'mcp.json', 'pause'].includes(name) || !value || typeof value !== 'object') throw Error('invalid_change');
     if (name === 'config.json') {
-      if (Object.keys(value).some(key => !['instance_url', 'device'].includes(key))) throw Error('unknown_config_fields');
+      if (Object.keys(value).some(key => !['instance_url', 'device', 'engine'].includes(key))) throw Error('unknown_config_fields');
       changes[name] = validateConfig(value);
     }
     if (name === 'pause') {
@@ -29,7 +29,7 @@ export async function changeFiles(changes) {
     try { before[name] = await readJSON(pathFor(name)); }
     catch (e) { if (e.code !== 'ENOENT') throw e; before[name] = null; }
     // Refuse a legacy config containing secret/unknown fields rather than copying it.
-    const allowed = name === 'config.json' ? ['instance_url', 'device'] : name === 'pause' ? ['until'] : ['mcpServers'];
+    const allowed = name === 'config.json' ? ['instance_url', 'device', 'engine'] : name === 'pause' ? ['until'] : ['mcpServers'];
     if (before[name] && Object.keys(before[name]).some(key => !allowed.includes(key))) throw Error('unknown_config_fields');
     if (name === 'mcp.json' && before[name]) before[name] = validateMcp(before[name],
       validateConfig(before['config.json'] ?? await readJSON(pathFor('config.json'))));
@@ -61,8 +61,14 @@ export async function manage(args) {
   }
   if (command === 'setup') {
     if (rest.length !== 2) throw Error('usage');
-    const config = validateConfig({ instance_url: rest[0], device: rest[1] });
+    const previous = await readJSON(pathFor('config.json')).catch(e => { if (e.code === 'ENOENT') return {}; throw e; });
+    const config = validateConfig({ instance_url: rest[0], device: rest[1],
+      ...(Object.hasOwn(previous, 'engine') ? { engine: previous.engine } : {}) });
     return changeFiles({ 'config.json': config, 'mcp.json': { mcpServers: { hmp: { type: 'http', url: config.instance_url + '/mcp' } } } });
+  }
+  if (command === 'engine') {
+    if (rest.length !== 1 || !['claude', 'codex'].includes(rest[0])) throw Error('invalid_engine');
+    return changeFiles({ 'config.json': { ...await loadConfig(), engine: rest[0] } });
   }
   if (command === 'pause') {
     if (rest.length !== 1 || !/^\d+$/.test(rest[0]) || Number(rest[0]) > 525600) throw Error('invalid_duration');
@@ -73,10 +79,11 @@ export async function manage(args) {
     const remote = await request(config, token, '/api/client/config', manual());
     const label = typeof remote.instance_label === 'string' ? remote.instance_label : '';
     const worker = await verifyWorker(remote.points ? 'points' : 'legacy');
-    return { instance_label: redact(label.split(token).join('<SECRET>')).replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, 80), connected: true, worker };
+    return { instance_label: redact(label.split(token).join('<SECRET>')).replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, 80), connected: true, engine: config.engine ?? 'claude', worker };
   }
   if (command === 'status') {
-    if (rest.length && await isOffrecord(rest[0])) return { client_version: CLIENT_VERSION, offrecord: true, notice: 'このセッションはオフレコ' };
+    if (rest.length && await isOffrecord(rest[0])) return { client_version: CLIENT_VERSION,
+      engine: await loadConfig().then(config => config.engine ?? 'claude', () => null), offrecord: true, notice: 'このセッションはオフレコ' };
     const last = await readJSON(pathFor('last-send.json')).catch(e => { if (e.code === 'ENOENT') return null; throw e; });
     let pending = null;
     const config = await loadConfig(), token = await loadToken(config);
@@ -86,7 +93,7 @@ export async function manage(args) {
       // Local metrics must not hide a successfully refreshed server status.
       await recordBacklog(config, summary).catch(() => {});
     } catch {}
-    return { client_version: CLIENT_VERSION, ...await spoolStatus(config),
+    return { client_version: CLIENT_VERSION, engine: config.engine ?? 'claude', ...await spoolStatus(config),
       last_send: last?.sent_at ?? null, turns: await turnStatus(config), pending,
       points_stats: await pointsStats(config).catch(() => null), backlog_history: await backlogHistory(config).catch(() => null) };
   }

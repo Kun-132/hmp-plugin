@@ -36,11 +36,11 @@ test('points stats append numeric fields only, privately, and retain 500 per ori
   const file = pathFor('points-stats.json'), raw = await readFile(file, 'utf8'), saved = JSON.parse(raw);
   const rows = saved[config.instance_url];
   assert.equal(rows.length, 500); assert.equal(rows[0].accepted_at, 2);
-  assert.deepEqual(rows.at(-1), { accepted_at: 20000, turn_to_accepted_ms: 500, duration_ms: 123,
+  assert.deepEqual(rows.at(-1), { engine: 'claude', accepted_at: 20000, turn_to_accepted_ms: 500, duration_ms: 123,
     written: 3, dropped: 7, dropped_by_reason: { evidence_not_found: 4, speaker_mismatch: 2 },
     input_tokens: 2, cache_creation_input_tokens: 100, cache_read_input_tokens: 200, input_total_tokens: 302, output_tokens: 50 });
   assert.deepEqual(saved[other.instance_url], [row(5)]);
-  assert.ok(rows.every(value => Object.entries(value).every(([key, n]) => key === 'dropped_by_reason'
+  assert.ok(rows.every(value => Object.entries(value).every(([key, n]) => key === 'engine' ? n === 'claude' : key === 'dropped_by_reason'
     ? Object.values(n).every(Number.isSafeInteger) : typeof n === 'number')));
   assert.ok(!raw.includes('SYNTHETIC_'));
   assert.equal((await stat(file)).mode & 0o777, 0o600);
@@ -87,6 +87,23 @@ test('backlog keeps 200 numeric observations per origin and displays first/lates
   });
   assert.ok(saved[config.instance_url].every(value => Object.values(value).every(n => typeof n === 'number')));
   assert.ok(!raw.includes('SYNTHETIC_PRIVATE')); assert.equal((await stat(file)).mode & 0o777, 0o600);
+});
+test('terminal medians split by engine, treating old rows as Claude and ignoring unknown engines', async t => {
+  await localHome(t);
+  const now = 3 * 86400_000;
+  await writeJSON(pathFor('points-stats.json'), { [config.instance_url]: [
+    { ...row(now, 1), input_tokens: 2 }, { ...row(now - 86400_001, 9), engine: 'claude', input_tokens: 4 },
+    { ...row(now, 20), engine: 'codex', input_tokens: 50 }, { ...row(now, 30), engine: 'codex', input_tokens: 100 },
+    { ...row(now, 99), engine: 'SYNTHETIC_PRIVATE' },
+  ] });
+  const stats = await pointsStats(config, now);
+  assert.equal(stats.by_engine.claude.all.count, 2); assert.equal(stats.by_engine.claude.last_24h.count, 1);
+  assert.equal(stats.by_engine.claude.all.input_tokens_median, 3);
+  assert.equal(stats.by_engine.codex.all.count, 2); assert.equal(stats.by_engine.codex.last_24h.count, 2);
+  assert.equal(stats.by_engine.codex.all.input_tokens_median, 75);
+  assert.deepEqual(stats.by_engine.codex.all.turn_to_accepted_seconds, { median: 25, p90: 30 });
+  assert.equal(stats.all.count, 4); assert.equal(stats.mcp.all.count, 0);
+  assert.ok(!JSON.stringify(stats).includes('SYNTHETIC_PRIVATE'));
 });
 test('MCP numeric rows keep terminal medians separate and use completion time for the 24h window', async t => {
   await localHome(t);

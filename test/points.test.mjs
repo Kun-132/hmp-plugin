@@ -207,7 +207,7 @@ test('each accepted local turn adds numeric stats without text, IDs or sessions'
     assert.equal(sample.turn_to_accepted_ms, sample.accepted_at - submitted.usage.turn_ended_at);
     assert.equal(sample.duration_ms, submitted.usage.duration_ms);
     assert.deepEqual({ ...sample, accepted_at: 0, turn_to_accepted_ms: 0, duration_ms: 0 },
-      { accepted_at: 0, turn_to_accepted_ms: 0, duration_ms: 0, input_tokens: 2, cache_creation_input_tokens: 100,
+      { engine: 'claude', accepted_at: 0, turn_to_accepted_ms: 0, duration_ms: 0, input_tokens: 2, cache_creation_input_tokens: 100,
         cache_read_input_tokens: 200, input_total_tokens: 302, output_tokens: 45, written: 1, dropped: 3,
         dropped_by_reason: { duplicate: 2, invalid: 1 } });
     assert.equal((await stat(join(f.home, '.hmp/points-stats.json'))).mode & 0o777, 0o600);
@@ -371,7 +371,8 @@ test('points and line MCP stages persist runClaude stop reasons without body, ID
     for (const [reason, script, versionScript = '', unknown = false] of cases) {
       const f = await fixture(t, { remote: { points: { ...contract, backlog: stage === POINT_TOOLS ? 1 : 0 },
         pending: { lines: stage === LINE_TOOLS ? 1 : 0 } } });
-      await cached(f, { max_seconds_per_turn: 1 });
+      // Let output_limit win over the timeout even on slow CI runners.
+      await cached(f, { max_seconds_per_turn: reason === 'output_limit' ? 30 : 1 });
       await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\nif (process.argv.includes('--version')) {
         ${versionScript} process.stdout.write('2.1.309'); process.exit(0);
       } process.stderr.write('${privateText}');\n${script}`, { mode: 0o700 });
