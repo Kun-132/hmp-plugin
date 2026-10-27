@@ -126,8 +126,12 @@ export async function turnStatus(config) {
   return { count: queue.length, oldest: queue.length ? new Date(queue[0].turn.turn_ended_at).toISOString() : null,
     last_failure: FAILURE_CODES.includes(failure?.code) ? failure.code : null };
 }
+export const MCP_FAILURE_CODES = Object.freeze(['mcp_config_invalid', 'mcp_version_failed', 'mcp_version_unsupported',
+  'mcp_not_connected', 'mcp_tools_missing', 'mcp_tools_unexpected', 'mcp_forbidden_tool', 'mcp_invalid_tool_id', 'mcp_claim_limit', 'mcp_submit_limit',
+  'mcp_forbidden_read', 'mcp_verification_tool_call', 'mcp_stream_invalid', 'mcp_timeout', 'mcp_result_failed',
+  'mcp_result_missing', 'mcp_exit_failed', 'mcp_spawn_failed', 'mcp_output_limit', 'mcp_interrupted']);
 export const FAILURE_CODES = Object.freeze(['stale_lock_cleared', 'events_unavailable', 'capture_pending', 'contract_invalid', 'claude_failed',
-  'claude_timeout', 'output_invalid', 'points_unavailable', 'points_rejected', 'daily_limit', 'mcp_failed', 'turn_expired']);
+  'claude_timeout', 'output_invalid', 'points_unavailable', 'points_rejected', 'daily_limit', 'mcp_failed', 'turn_expired', ...MCP_FAILURE_CODES]);
 export async function recordFailure(config, code) {
   if (!FAILURE_CODES.includes(code)) throw Error('invalid_failure');
   await writeJSON(failurePath(config), { code, at: Date.now() });

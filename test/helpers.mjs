@@ -11,6 +11,16 @@ export const workerInit = { type: 'system', subtype: 'init', mcp_servers: [{ nam
 export const extractionWorkerInit = { ...workerInit, tools: workerInit.tools.slice(0, 3) };
 export const workerSuccess = { type: 'result', subtype: 'success', is_error: false, result: 'OK' };
 export const successfulClaude = `process.stdout.write(${JSON.stringify(JSON.stringify(workerInit) + '\n' + JSON.stringify(workerSuccess) + '\n')});`;
+export function mcpEvents(events) {
+  return `for (const event of ${JSON.stringify(events)}) {
+    if (event.type === 'system' && event.subtype === 'init') {
+      const index = process.argv.indexOf('--disallowedTools');
+      const denied = index < 0 ? [] : process.argv.slice(index + 1, process.argv.findIndex((arg, i) => i > index && arg.startsWith('--')));
+      event.tools = event.tools.filter(name => !denied.includes(name));
+    }
+    process.stdout.write(JSON.stringify(event) + '\\n');
+  }`;
+}
 let reportedFallback = false;
 export async function fixture(t, { remote = {}, fail = false, noToken = false, claude = '' } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'hmp-test-'));

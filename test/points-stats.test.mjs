@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fixture } from './helpers.mjs';
 import { writeJSON, pathFor } from '../plugins/hmp/scripts/state.mjs';
-import { recordPointsStats, pointsStats, recordBacklog, backlogHistory } from '../plugins/hmp/scripts/points-stats.mjs';
+import { recordPointsStats, recordMcpStats, pointsStats, recordBacklog, backlogHistory } from '../plugins/hmp/scripts/points-stats.mjs';
 
 const config = { instance_url: 'https://synthetic.example' };
 const other = { instance_url: 'https://other.example' };
@@ -69,7 +69,8 @@ test('points stats calculate numeric medians and nearest-rank p90 for 24h and al
   assert.equal(stats.last_24h.written_median, 5);
   const empty = await pointsStats({ instance_url: 'https://empty.example' }, now);
   assert.deepEqual(empty.last_24h, { count: 0, turn_to_accepted_seconds: { median: null, p90: null },
-    input_tokens_median: null, input_total_tokens_median: null, output_tokens_median: null, written_median: null,
+    duration_ms_median: null, input_tokens_median: null, cache_creation_input_tokens_median: null, cache_read_input_tokens_median: null,
+    input_total_tokens_median: null, output_tokens_median: null, written_median: null,
     dropped: 0, dropped_by_reason: {} });
 });
 test('backlog keeps 200 numeric observations per origin and displays first/latest timestamps', async t => {
@@ -87,10 +88,38 @@ test('backlog keeps 200 numeric observations per origin and displays first/lates
   assert.ok(saved[config.instance_url].every(value => Object.values(value).every(n => typeof n === 'number')));
   assert.ok(!raw.includes('SYNTHETIC_PRIVATE')); assert.equal((await stat(file)).mode & 0o777, 0o600);
 });
+test('MCP numeric rows keep terminal medians separate and use completion time for the 24h window', async t => {
+  await localHome(t);
+  const now = 3 * 86400_000;
+  const terminal = { ...row(now), input_total_tokens: 302, input_tokens: 2 };
+  const oldMcp = { path: 'mcp', at: now - 86400_001, duration_ms: 50000,
+    input_tokens: 100, cache_creation_input_tokens: 100, cache_read_input_tokens: 9800, input_total_tokens: 10000, output_tokens: 5000 };
+  await writeJSON(pathFor('points-stats.json'), { [config.instance_url]: [terminal, oldMcp], [other.instance_url]: [oldMcp] });
+  await recordMcpStats(config, { duration_ms: 17600, input_tokens: 6, cache_creation_input_tokens: 7949,
+    cache_read_input_tokens: 7742, input_total_tokens: 15697, output_tokens: 1610,
+    result: 'SYNTHETIC_PRIVATE', id: 'SYNTHETIC_ID', session: 'SYNTHETIC_SESSION' }, now);
+  await recordMcpStats(config, { duration_ms: 1000, input_tokens: 10, cache_creation_input_tokens: 100,
+    cache_read_input_tokens: 1000, input_total_tokens: 1110, output_tokens: 10 }, now - 86400_000);
+  const file = pathFor('points-stats.json'), raw = await readFile(file, 'utf8'), saved = JSON.parse(raw);
+  assert.deepEqual(saved[config.instance_url][0], terminal);
+  assert.deepEqual(saved[other.instance_url], [oldMcp]);
+  assert.ok(saved[config.instance_url].slice(1).every(row => row.path === 'mcp'
+    && Object.entries(row).every(([key, n]) => key === 'path' || typeof n === 'number')));
+  assert.ok(!raw.includes('SYNTHETIC_')); assert.equal((await stat(file)).mode & 0o777, 0o600);
+  const stats = await pointsStats(config, now);
+  assert.equal(stats.all.count, 1); assert.equal(stats.all.input_total_tokens_median, 302);
+  assert.equal(stats.mcp.all.count, 3); assert.equal(stats.mcp.last_24h.count, 2);
+  assert.equal(stats.mcp.all.input_tokens_median, 10); assert.equal(stats.mcp.all.input_total_tokens_median, 10000);
+  assert.deepEqual(stats.mcp.last_24h, { count: 2, duration_ms_median: 9300, input_tokens_median: 8,
+    cache_creation_input_tokens_median: 4024.5, cache_read_input_tokens_median: 4371,
+    input_total_tokens_median: 8403.5, output_tokens_median: 810 });
+});
 test('status samples fresh config only, shows current-origin stats and retains history when offline', async t => {
   const f = await fixture(t, { remote: { pending: { extraction: 8 }, points: { backlog: 5, instructions: 'SYNTHETIC_PRIVATE' } } });
   await f.write('points-stats.json', { [f.url]: [{ ...row(Date.now(), 2), input_tokens: 2, input_total_tokens: 302,
-    dropped: 6, dropped_by_reason: { evidence_not_found: 4, speaker_mismatch: 2 } }], [other.instance_url]: [row(Date.now(), 99)] });
+    dropped: 6, dropped_by_reason: { evidence_not_found: 4, speaker_mismatch: 2 } },
+  { path: 'mcp', at: Date.now(), duration_ms: 17600, input_tokens: 6, cache_creation_input_tokens: 7949,
+    cache_read_input_tokens: 7742, input_total_tokens: 15697, output_tokens: 1610 }], [other.instance_url]: [row(Date.now(), 99)] });
   const status = async () => {
     const result = await f.run('manage.mjs', ['status']);
     assert.equal(result.code, 0, result.stderr); assert.ok(!result.stdout.includes('SYNTHETIC_PRIVATE'));
@@ -100,6 +129,9 @@ test('status samples fresh config only, shows current-origin stats and retains h
   assert.equal(first.points_stats.all.count, 1); assert.equal(first.points_stats.all.turn_to_accepted_seconds.median, 2);
   assert.equal(first.points_stats.all.input_tokens_median, 2);
   assert.equal(first.points_stats.all.input_total_tokens_median, 302);
+  assert.equal(first.points_stats.mcp.all.count, 1);
+  assert.equal(first.points_stats.mcp.last_24h.input_total_tokens_median, 15697);
+  assert.equal(first.points_stats.mcp.all.duration_ms_median, 17600);
   assert.equal(first.points_stats.last_24h.dropped, 6);
   assert.deepEqual(first.points_stats.last_24h.dropped_by_reason, { evidence_not_found: 4, speaker_mismatch: 2 });
   assert.deepEqual(first.backlog_history.first, first.backlog_history.latest);

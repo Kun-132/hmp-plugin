@@ -10,9 +10,10 @@ import { pathFor, readJSON, writeJSON, remove, paused } from './state.mjs';
 import { flush, spoolFilename } from './events.mjs';
 import { request, serverSummary } from './client.mjs';
 import { isOffrecord, discardSessionFiles } from './offrecord.mjs';
-import { readyTurns, retryPath, deferTurn, sentencesFor, recordFailure } from './turns.mjs';
-import { claudeEnv, runClaude, ownsWorkerLock, POINT_TOOLS, LINE_TOOLS, supportedVersion } from './worker.mjs';
-import { recordPointsStats } from './points-stats.mjs';
+import { readyTurns, retryPath, deferTurn, sentencesFor, recordFailure, MCP_FAILURE_CODES } from './turns.mjs';
+import { claudeEnv, ownsWorkerLock, POINT_TOOLS, LINE_TOOLS, supportedVersion } from './worker.mjs';
+import { runMcpClaude } from './mcp-tools.mjs';
+import { recordPointsStats, recordMcpStats } from './points-stats.mjs';
 
 export const POINTS_MAXIMUM = Object.freeze({ max_turns_per_day: 300, max_turns_per_run: 10, max_seconds_per_turn: 90 });
 export function pointsLimits(limits = {}) {
@@ -194,9 +195,12 @@ export async function runPointsWorker(config, summary, { remaining = Infinity } 
       let progressed = false;
       try {
         if (!mcpReady) {
-          validateMcp(await readJSON(pathFor('mcp.json')), config);
-          const version = await promisify(execFile)('claude', ['--version'], { env: claudeEnv(), timeout: 1500, maxBuffer: 1024 });
-          if (!supportedVersion(version.stdout)) return outcome;
+          try { validateMcp(await readJSON(pathFor('mcp.json')), config); }
+          catch { await recordFailure(config, 'mcp_config_invalid'); return outcome; }
+          let version;
+          try { version = await promisify(execFile)('claude', ['--version'], { env: claudeEnv(), timeout: 1500, maxBuffer: 1024 }); }
+          catch { await recordFailure(config, 'mcp_version_failed'); return outcome; }
+          if (!supportedVersion(version.stdout)) { await recordFailure(config, 'mcp_version_unsupported'); return outcome; }
           mcpReady = true;
         }
         for (const stage of stages) {
@@ -206,8 +210,12 @@ export async function runPointsWorker(config, summary, { remaining = Infinity } 
             if (!await allowed()) return outcome;
             if (!await reserve()) return outcome;
             progressed = true;
-            const result = await runClaude(directory, stage.tools[0], limits.max_seconds_per_turn * 1000, { mcpOnly: true });
-            if (result.status !== 'ok') { await recordFailure(config, 'mcp_failed'); stage.stopped = true; }
+            const result = await runMcpClaude(config, directory, stage.tools, limits.max_seconds_per_turn * 1000);
+            if (result.status === 'ok') await recordMcpStats(config, result.usage).catch(() => {});
+            if (result.status !== 'ok') {
+              const code = 'mcp_' + result.reason;
+              await recordFailure(config, MCP_FAILURE_CODES.includes(code) ? code : 'mcp_failed'); stage.stopped = true;
+            }
             if (result.submits === 0) stage.stopped = true;
             if ((await readyTurns(config)).length) break;
           }

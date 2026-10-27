@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, writeFile, stat, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fixture } from './helpers.mjs';
+import { fixture, mcpEvents } from './helpers.mjs';
 import { AUTOMATED_PREFIXES, sentencesFor } from '../plugins/hmp/scripts/turns.mjs';
 import { POINTS_MAXIMUM, pointsLimits, pointsArgs, runPointsClaude, validateOutput } from '../plugins/hmp/scripts/points-worker.mjs';
 import { POINT_TOOLS, LINE_TOOLS, claudeArgs, createStreamGuard } from '../plugins/hmp/scripts/worker.mjs';
@@ -25,6 +25,7 @@ process.stdin.on('end', () => { fs.writeFileSync(process.env.HOME + '/points-inp
 const ok = r => { assert.equal(r.code, 0, r.stderr); assert.equal(r.stderr, ''); return r.stdout ? JSON.parse(r.stdout) : null; };
 async function cached(f, limits = {}, pending = {}) {
   await f.write('server-config.json', { instance_origin: f.url, points: { ...contract, limits }, pending });
+  await f.write('mcp-tools.json', { [f.url]: [...POINT_TOOLS, ...LINE_TOOLS] });
 }
 async function seed(t, options = {}) {
   const f = await fixture(t, { claude: fake, ...options });
@@ -279,8 +280,8 @@ test('pending server work runs only after local turns, points before lines, with
   const script = `if (process.argv.includes('--version')) { process.stdout.write('2.1.309'); process.exit(0); }
 if (process.argv.includes('--json-schema')) { ${fake} } else {
 const fs = require('node:fs'); fs.appendFileSync(process.env.HOME + '/points-launches.jsonl', JSON.stringify({ args: process.argv.slice(2), env: process.env }) + '\\n');
-process.stdout.write(${JSON.stringify(JSON.stringify(init) + '\n')});
-const name = process.argv.includes(${JSON.stringify(POINT_TOOLS[0])}) ? ${JSON.stringify(POINT_TOOLS[1])} : ${JSON.stringify(LINE_TOOLS[1])};
+${mcpEvents([init])}
+const name = process.argv[process.argv.indexOf('--allowedTools') + 1] === ${JSON.stringify(POINT_TOOLS[0])} ? ${JSON.stringify(POINT_TOOLS[1])} : ${JSON.stringify(LINE_TOOLS[1])};
 process.stdout.write(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'submit', name, input: {} }] } }) + '\\n');
 process.stdout.write(${JSON.stringify(JSON.stringify(success) + '\n')}); }`;
   await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\n${script}`, { mode: 0o700 });
@@ -292,24 +293,102 @@ process.stdout.write(${JSON.stringify(JSON.stringify(success) + '\n')}); }`;
   assert.deepEqual(calls.slice(1).map(c => c.args[c.args.indexOf('--allowedTools') + 1]), [POINT_TOOLS[0], POINT_TOOLS[0], LINE_TOOLS[0]]);
   for (const c of calls.slice(1)) {
     assert.equal(c.args[c.args.indexOf('--tools') + 1], ''); assert.equal(c.args[c.args.indexOf('--model') + 1], 'sonnet');
-    const allowed = c.args.slice(c.args.indexOf('--allowedTools') + 1, c.args.indexOf('--permission-mode'));
+    const allowed = c.args.slice(c.args.indexOf('--allowedTools') + 1, c.args.indexOf('--disallowedTools'));
     assert.deepEqual(allowed, allowed[0] === POINT_TOOLS[0] ? POINT_TOOLS : LINE_TOOLS);
   }
   assert.equal((await f.read('points-usage.json')).turns, 4);
-  assert.equal((await f.read('points-stats.json'))[f.url].length, 1);
+  assert.equal((await f.read('points-stats.json'))[f.url].length, 4);
 });
 test('MCP OAuth failure stays in its stage and cannot block a subsequent local turn', async t => {
   const f = await seed(t);
   await cached(f, {}, { extraction: 2 });
   f.state.remote = { points: { ...contract, backlog: 2 } };
   // The fake model emits a non-stream result for MCP, so its connection check fails.
-  ok(await f.run('worker.mjs')); assert.equal((await f.names('turns')).length, 0); assert.equal(await lastCode(f), 'mcp_failed');
+  ok(await f.run('worker.mjs')); assert.equal((await f.names('turns')).length, 0); assert.equal(await lastCode(f), 'mcp_not_connected');
   await f.write('worker.lock', { pid: process.pid });
   await f.hook('UserPromptSubmit', { prompt_id: 'later' }); await f.hook('Stop', { prompt_id: 'later' });
   await rm(join(f.home, '.hmp/worker.lock'));
   await cached(f); f.state.remote = {}; await f.write('mcp.json', { mcpServers: { evil: { command: 'false' } } });
   ok(await f.run('worker.mjs')); assert.equal((await f.names('turns')).length, 0);
   assert.equal(f.requests.filter(r => r.url === '/api/client/points').length, 2);
+});
+test('MCP preflight failures reach status as fixed codes without CLI or config contents', async t => {
+  const privateText = 'SYNTHETIC_PRIVATE_BODY_ID_SECRET';
+  const cases = [
+    ['config_invalid', f => f.write('mcp.json', { mcpServers: { hmp: { command: privateText } } })],
+    ['config_invalid', f => writeFile(join(f.home, '.hmp/mcp.json'), privateText)],
+    ['config_invalid', f => rm(join(f.home, '.hmp/mcp.json'))],
+    ['version_failed', f => rm(join(f.bin, 'claude'))],
+    ['version_failed', f => writeFile(join(f.bin, 'claude'), `#!${process.execPath}\nprocess.stderr.write('${privateText}'); process.exit(1);`, { mode: 0o700 })],
+    ['version_failed', f => writeFile(join(f.bin, 'claude'), `#!${process.execPath}\nsetTimeout(() => {}, 30000);`, { mode: 0o700 })],
+    ['version_unsupported', f => writeFile(join(f.bin, 'claude'), `#!${process.execPath}\nprocess.stdout.write('2.1.308 ${privateText}');`, { mode: 0o700 })],
+    ['version_unsupported', f => writeFile(join(f.bin, 'claude'), `#!${process.execPath}\nprocess.stdout.write('${privateText}');`, { mode: 0o700 })],
+  ];
+  for (const [reason, prepare] of cases) {
+    const f = await fixture(t, { remote: { points: { ...contract, backlog: 1 } } });
+    await cached(f); await prepare(f);
+    const response = await f.run('worker.mjs'); ok(response);
+    assert.ok(!JSON.stringify(response).includes(privateText));
+    assert.equal(await lastCode(f), 'mcp_' + reason);
+    const metadata = await f.read((await f.names('.')).find(n => n.startsWith('points-failure-')));
+    assert.deepEqual(Object.keys(metadata).sort(), ['at', 'code']);
+    assert.equal(metadata.code, 'mcp_' + reason);
+    assert.ok(!JSON.stringify(metadata).includes(privateText));
+    await assert.rejects(stat(join(f.home, '.hmp/points-usage.json')), { code: 'ENOENT' });
+  }
+});
+test('points and line MCP stages persist runClaude stop reasons without body, IDs or secrets', async t => {
+  const privateText = 'SYNTHETIC_PRIVATE_BODY_ID_SECRET';
+  const emit = mcpEvents;
+  const tool = (name, id = privateText) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', name, id, input: { text: privateText } }] } });
+  const init = { type: 'system', subtype: 'init', session_id: privateText,
+    mcp_servers: [{ name: 'hmp', status: 'connected' }], tools: [...POINT_TOOLS, ...LINE_TOOLS] };
+  const success = { type: 'result', subtype: 'success', is_error: false, result: privateText };
+  for (const stage of [POINT_TOOLS, LINE_TOOLS]) {
+    const cases = [
+      ['not_connected', emit([{ ...init, mcp_servers: [{ name: 'hmp', status: 'needs-auth', error: privateText }] }])],
+      ['not_connected', emit([{ ...init, mcp_servers: [{ name: 'hmp', status: 'failed', error: privateText }] }])],
+      ['not_connected', emit([{ ...init, mcp_server_errors: [privateText] }])],
+      ['not_connected', emit([success])],
+      ['tools_missing', emit([{ ...init, tools: stage.slice(0, 1) }])],
+      ['forbidden_tool', emit([init, tool('Bash')])],
+      ['forbidden_tool', emit([init, { type: 'stream_event', event: { type: 'content_block_start', index: 0,
+        content_block: { type: 'tool_use', name: 'Read', id: privateText } } }])],
+      ['invalid_tool_id', emit([init, tool(stage[0]), tool(stage[1])])],
+      ['claim_limit', emit([init, tool(stage[0]), tool(stage[0], 'second')])],
+      ['submit_limit', emit([init, ...Array.from({ length: 4 }, (_, i) => tool(stage[1], String(i)))])],
+      ['stream_invalid', `process.stdout.write('${privateText}\\n');`],
+      ['timeout', 'setTimeout(() => {}, 30000);'],
+      ['result_failed', emit([init, { ...success, subtype: 'error_during_execution', errors: [privateText] }])],
+      ['result_failed', emit([init, { ...success, is_error: true }])],
+      ['result_missing', emit([init])],
+      ['exit_failed', emit([init, success]) + 'process.exitCode = 1;'],
+      ['spawn_failed', '', `require('node:fs').unlinkSync(process.argv[1]);`],
+      ['output_limit', `process.stdout.write('${privateText}'.repeat(1024 * 1024));`],
+      ['interrupted', 'process.kill(process.ppid, "SIGTERM"); setTimeout(() => {}, 30000);'],
+      ['failed', emit([init, success]), '', true],
+    ];
+    for (const [reason, script, versionScript = '', unknown = false] of cases) {
+      const f = await fixture(t, { remote: { points: { ...contract, backlog: stage === POINT_TOOLS ? 1 : 0 },
+        pending: { lines: stage === LINE_TOOLS ? 1 : 0 } } });
+      await cached(f, { max_seconds_per_turn: 1 });
+      await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\nif (process.argv.includes('--version')) {
+        ${versionScript} process.stdout.write('2.1.309'); process.exit(0);
+      } process.stderr.write('${privateText}');\n${script}`, { mode: 0o700 });
+      if (unknown) await writeFile(join(f.home, '.hmp/points-usage.json'), privateText);
+      const response = await f.run('worker.mjs'); ok(response);
+      assert.ok(!JSON.stringify(response).includes(privateText));
+      const statusResponse = await f.run('manage.mjs', ['status']);
+      const status = ok(statusResponse);
+      assert.equal(status.turns.last_failure, 'mcp_' + reason, stage[0] + ':' + reason);
+      assert.ok(!JSON.stringify(statusResponse).includes(privateText));
+      const metadata = await f.read((await f.names('.')).find(n => n.startsWith('points-failure-')));
+      assert.deepEqual(Object.keys(metadata).sort(), ['at', 'code']);
+      assert.equal(metadata.code, 'mcp_' + reason);
+      assert.ok(!JSON.stringify(metadata).includes(privateText));
+      assert.equal((await stat(join(f.home, '.hmp', (await f.names('.')).find(n => n.startsWith('points-failure-'))))).mode & 0o777, 0o600);
+    }
+  }
 });
 test('a missing capture leaves that turn, processes later ready turns, and suppresses MCP until drained', async t => {
   const f = await seed(t); await f.write('worker.lock', { pid: process.pid });
@@ -410,8 +489,8 @@ test('R2: identical answers with different human prompts close distinct turns', 
 
 const mcpFake = `const fs = require('node:fs');
 fs.appendFileSync(process.env.HOME + '/points-launches.jsonl', JSON.stringify({ args: process.argv.slice(2) }) + '\\n');
-process.stdout.write(${JSON.stringify(JSON.stringify({ type: 'system', subtype: 'init', mcp_servers: [{ name: 'hmp', status: 'connected' }], tools: [...POINT_TOOLS, ...LINE_TOOLS] }) + '\n')});
-const name = process.argv.includes('${POINT_TOOLS[0]}') ? '${POINT_TOOLS[1]}' : '${LINE_TOOLS[1]}';
+${mcpEvents([{ type: 'system', subtype: 'init', mcp_servers: [{ name: 'hmp', status: 'connected' }], tools: [...POINT_TOOLS, ...LINE_TOOLS] }])}
+const name = process.argv[process.argv.indexOf('--allowedTools') + 1] === '${POINT_TOOLS[0]}' ? '${POINT_TOOLS[1]}' : '${LINE_TOOLS[1]}';
 process.stdout.write(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'submit', name, input: {} }] } }) + '\\n');
 process.stdout.write(${JSON.stringify(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }) + '\n')});`;
 test('R3: MCP uses only backlog and lines freshly fetched in this worker, failing closed', async t => {
