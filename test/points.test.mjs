@@ -371,7 +371,8 @@ test('points and line MCP stages persist runClaude stop reasons without body, ID
     for (const [reason, script, versionScript = '', unknown = false] of cases) {
       const f = await fixture(t, { remote: { points: { ...contract, backlog: stage === POINT_TOOLS ? 1 : 0 },
         pending: { lines: stage === LINE_TOOLS ? 1 : 0 } } });
-      await cached(f, { max_seconds_per_turn: 1 });
+      // Let output_limit win over the timeout even on slow CI runners.
+      await cached(f, { max_seconds_per_turn: reason === 'output_limit' ? 30 : 1 });
       await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\nif (process.argv.includes('--version')) {
         ${versionScript} process.stdout.write('2.1.309'); process.exit(0);
       } process.stderr.write('${privateText}');\n${script}`, { mode: 0o700 });
