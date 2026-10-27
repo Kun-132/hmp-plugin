@@ -1,5 +1,5 @@
 import { pathToFileURL } from 'node:url';
-import { isOffrecord, setOffrecord, offrecordPath, discardSessionFiles } from './offrecord.mjs';
+import { isOffrecord, setOffrecord, offrecordPath } from './offrecord.mjs';
 import { loadConfig, loadToken, CLIENT_VERSION } from './config.mjs';
 import { manual, request } from './client.mjs';
 
@@ -10,7 +10,6 @@ export async function forget(args) {
   if (option === '--resume') return setOffrecord(session, false);
   if (!option) return setOffrecord(session, true);
   if (!await isOffrecord(session)) throw Error('offrecord_required');
-  if (option === '--confirm') await discardSessionFiles(session);
   const config = await loadConfig(), token = await loadToken(config);
   return request(config, token, '/api/client/forget', { body: {
     client_version: CLIENT_VERSION, device: config.device, session, scope: 'session',

@@ -17,7 +17,7 @@ export async function fixture(t, { remote = {}, fail = false, noToken = false, c
   const bin = join(home, 'mock-bin'), project = join(home, 'project');
   await mkdir(bin); await mkdir(project); await mkdir(join(home, '.hmp'), { mode: 0o700 });
   const requests = [], seen = new Set();
-  const state = { fail, remote, hang: false, receipt: null, delayMs: 0, pointsFail: false, pointsReceipt: { status: 'accepted', written: 1, dropped: {} } };
+  const state = { fail, remote, hang: false, receipt: null, delayMs: 0 };
   const pause = () => new Promise(resolve => setTimeout(resolve, state.delayMs));
   const respond = (method, url, raw, headers = {}) => {
     requests.push({ method, url, body: raw ? JSON.parse(raw) : null, authorization: headers.Authorization ?? headers.authorization ?? null });
@@ -25,13 +25,11 @@ export async function fixture(t, { remote = {}, fail = false, noToken = false, c
     if (state.fail) return { status: 503, body: '{}' };
     if (url === '/api/client/forget') return { status: 200, body: JSON.stringify({ forgotten: { captures: 2, facts: 1, blocks: 1 }, retained_notice: 'Synthetic retained notice' }) };
     if (url === '/api/client/config') return { status: 200, body: JSON.stringify(state.remote) };
-    if (url === '/api/client/events' && state.eventsPaused) return { status: 503, body: JSON.stringify({ error: 'client_source_paused' }) };
-    if (url === '/api/client/points') return { status: state.pointsFail ? 503 : 200, body: JSON.stringify(state.pointsReceipt) };
     let accepted = 0, duplicates = 0;
     for (const event of JSON.parse(raw).events) {
       if (seen.has(event.client_event_id)) duplicates++; else { seen.add(event.client_event_id); accepted++; }
     }
-    return { status: 200, body: JSON.stringify(state.receipt ?? { accepted, duplicates, rejected: [], captures: JSON.parse(raw).events.map(e => ({ client_event_id: e.client_event_id, capture_id: 'cap_' + e.client_event_id.slice(4) })) }) };
+    return { status: 200, body: JSON.stringify(state.receipt ?? { accepted, duplicates, rejected: [] }) };
   };
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
