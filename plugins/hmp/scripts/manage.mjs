@@ -7,6 +7,7 @@ import { redact, spoolStatus } from './events.mjs';
 import { turnStatus } from './turns.mjs';
 import { verifyWorker } from './worker.mjs';
 import { codexHooks, restoreCodexHooks } from './codex-hooks.mjs';
+import { pointsStats, recordBacklog, backlogHistory } from './points-stats.mjs';
 
 export async function changeFiles(changes) {
   for (const [name, value] of Object.entries(changes)) {
@@ -79,9 +80,15 @@ export async function manage(args) {
     const last = await readJSON(pathFor('last-send.json')).catch(e => { if (e.code === 'ENOENT') return null; throw e; });
     let pending = null;
     const config = await loadConfig(), token = await loadToken(config);
-    try { pending = (await import('./client.mjs')).serverSummary(await request(config, token, '/api/client/config', manual())).pending; } catch {}
+    try {
+      const summary = (await import('./client.mjs')).serverSummary(await request(config, token, '/api/client/config', manual()));
+      pending = summary.pending;
+      // Local metrics must not hide a successfully refreshed server status.
+      await recordBacklog(config, summary).catch(() => {});
+    } catch {}
     return { client_version: CLIENT_VERSION, ...await spoolStatus(config),
-      last_send: last?.sent_at ?? null, turns: await turnStatus(config), pending };
+      last_send: last?.sent_at ?? null, turns: await turnStatus(config), pending,
+      points_stats: await pointsStats(config).catch(() => null), backlog_history: await backlogHistory(config).catch(() => null) };
   }
   if (command === 'restore') {
     if (!/^\d+-\d+$/.test(rest[0]) || rest.length !== 1) throw Error('invalid_backup');

@@ -55,7 +55,9 @@ prompt_id が無い同一セッションの同じ本文・kind は同一イベ�
 
 作業ディレクトリまたは親に `.hmp-ignore` があると、一時保存・送信・再送・新規処理役起動を行いません。シンボリックリンクの実体側も調べます。`/hmp:pause` で期限付き停止、解除は0分。停止中は spool も作りません。期限切れ後に再開します。既存 spool は停止中も手元に残り、起動済み処理役は継続します。
 
-`/hmp:onboard` だけが `~/.claude/projects/<project>/*.jsonl` を読みます。指定期間の user と各ターン最後の assistant のテキストだけを、件数と期間の確認・本人了承後に同じ kind 付きで送ります。tool_result、tool_use、thinking、メタ、subagent、除外・停止中のログは対象外。プレビューの伏せ字済み計画は、その時点の origin とともに `~/.hmp/onboard/` に保存します。送信時に origin が変わっている計画や origin 不明の旧計画は拒否し、再プレビューを必要とします。通常 Hook は過去ログを読みません。`/hmp:status` は spool の全件数・origin による保留件数・最終送信、現在の origin の端末の待ち `turns.{count,oldest,last_failure}`、HMP の `pending.{extraction,lines}`、版だけを表示します。最古は ISO 時刻、最後の失敗は固定コードだけです。HMP の待ちが未確認なら pending は null です。
+`/hmp:onboard` だけが `~/.claude/projects/<project>/*.jsonl` を読みます。指定期間の user と各ターン最後の assistant のテキストだけを、件数と期間の確認・本人了承後に同じ kind 付きで送ります。tool_result、tool_use、thinking、メタ、subagent、除外・停止中のログは対象外。プレビューの伏せ字済み計画は、その時点の origin とともに `~/.hmp/onboard/` に保存します。送信時に origin が変わっている計画や origin 不明の旧計画は拒否し、再プレビューを必要とします。通常 Hook は過去ログを読みません。`/hmp:status` は spool の全件数・origin による保留件数・最終送信、現在の origin の端末の待ち `turns.{count,oldest,last_failure}`、HMP の `pending.{extraction,lines}`、版を表示します。最古は ISO 時刻、最後の失敗は固定コードだけです。HMP の待ちが未確認なら pending は null です。
+
+`/hmp:status` の `points_stats` は直近24時間・保持中の全件の件数、ターン終了から受理までの秒数の中央値・p90（nearest-rank）、input/output tokens・書かれた要点数の中央値です。`~/.hmp/points-stats.json` は accepted のローカル抽出だけを origin ごとに最新500件、`~/.hmp/backlog-history.json` は status で取り直した pending.extraction・points.backlog と時刻を最新200件持ち、`backlog_history.first/latest` で待ちの減り方を見られます。どちらも0600で本文・ID・session は保存せず、MCP 経路は計測しません。
 
 設計 §18.1 に従い、スキル本文は入口だけに保ち、抽出の手順・出力契約は HMP の claim が返す instructions に寄せます。能力と最大値はサーバーから変更できません。
 
