@@ -1,6 +1,6 @@
 # HMP plugin 0.2.0
 
-Claude Code から HMP へ本人の言葉と最終回答を渡し、1ターンずつ送った端末の Sonnet で要点を作る小さな殻です。設定に `points` の契約がないインスタンスでは、0.1.x と同じ処理役を使います。Node.js 22 以上、依存パッケージなし。契約の `client_version` は `0.2.0`。マーケットプレイスと plugin の manifest に version は書きません。
+Claude Code・Codex から HMP へ本人の言葉と最終回答を渡し、1ターンずつ送った端末の Sonnet で要点を作る小さな殻です。設定に `points` の契約がないインスタンスでは、0.1.x と同じ処理役を使います。Node.js 22 以上、依存パッケージなし。契約の `client_version` は `0.2.0`。マーケットプレイスと plugin の manifest に version は書きません。
 
 ## インストール
 
@@ -11,6 +11,20 @@ Claude Code から HMP へ本人の言葉と最終回答を渡し、1ターン�
 3. `/hmp:setup` で同じインスタンス URL と発行時の端末名を設定します。表示された account で、本人が `security add-generic-password -s hmp-client -a '<account>' -w` をターミナルで実行し、入力欄へトークンを貼ります。account は `<device>@<origin のホスト名>`。例：`my-mac@hmp.example`。既存値を更新する場合だけ `-U` を加えます。
 4. 処理役用に本人が `claude mcp add --transport http --scope user hmp '<インスタンスURL>/mcp'` を実行し、下記の対話 `/mcp` で **hmp** を一度認証します。サーバー名は `hmp`、URL は setup が保存した正規化済み instance_url + `/mcp`、scope は全プロジェクトで使える `user` です。
 5. `node "${CLAUDE_PLUGIN_ROOT}/scripts/manage.mjs" verify` を実行し、表示されたインスタンス名と `worker.ready: true` を確認します。`/hmp:setup` もこの順で案内・確認します。
+
+Codex CLI（0.164）の会話も送る端末だけ、上記 setup 後に次を任意で実行します。同じ端末の `claude -p --model sonnet` が要点を作るため、Claude Code の通常ログインと処理役の認証も必要です。
+
+```sh
+node "${CLAUDE_PLUGIN_ROOT}/scripts/manage.mjs" codex-hooks install
+node "${CLAUDE_PLUGIN_ROOT}/scripts/manage.mjs" codex-hooks status
+node "${CLAUDE_PLUGIN_ROOT}/scripts/manage.mjs" codex-hooks remove
+```
+
+`install` は `~/.codex/hooks.json` の UserPromptSubmit・Stop・SessionStart の既存グループ末尾に各1件だけ追加します。同じ呼び口は重ねず、他ツールの項目・空白・表記を保持します。`status` は `installed: true|false` だけを返します。バックアップを `~/.hmp/backups/`、差分・戻し手順・読み戻し結果を `~/.hmp/changes/` に記録してから変更します。表示された `manage.mjs restore <ID>` でその時点へ復元でき、`codex-hooks remove` は HMP の項目だけを外して後から加えた他ツールの設定を保持します。新規作成した設定ファイルは、他の項目がなければ外す際に削除します。
+
+版をまたぐ呼び口は `~/.hmp/bin/codex-hook.mjs`（ディレクトリ0700・ファイル0600）です。`~/.claude/plugins/installed_plugins.json` の `hmp@hmp-marketplace` だけを参照し、`~/.claude/plugins/cache/hmp-marketplace/` 内の実体の `scripts/hook.mjs` を呼びます。symlink・外部パスは拒否し、未導入なら無出力で exit 0。`remove` 後も呼び口と変更履歴は残ります。
+
+Codex は `node hook.mjs <Event> codex` の入口を使い、`prompt_id` の代わりに `turn_id` で対を作り、Stop ごとにターンを閉じます。自動通知・オフレコ・一時停止・`.hmp-ignore`・一時保存・送信・ターン待ち・処理役は共通です。Codex の SessionStart は server-config の更新だけを行い、再送・処理役起動・標準出力はありません。
 
 配布先は上記の release ブランチです。開発時は `claude --plugin-dir ./plugins/hmp` も使えますが、Hook が有効になるので合成テスト用環境に限ってください。
 

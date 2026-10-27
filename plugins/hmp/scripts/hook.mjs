@@ -26,9 +26,10 @@ async function main() {
   }
   const input = JSON.parse(text);
   const event = process.argv[2];
+  const codex = process.argv[3] === 'codex';
   if (!['UserPromptSubmit', 'Stop', 'SessionStart'].includes(event)) return;
   if (await isOffrecord(input.session_id)) {
-    if (event === 'SessionStart') process.stdout.write(JSON.stringify({ hookSpecificOutput: {
+    if (event === 'SessionStart' && !codex) process.stdout.write(JSON.stringify({ hookSpecificOutput: {
       hookEventName: 'SessionStart', additionalContext: `HMP: このセッションはオフレコ\nHMP: session_id=${JSON.stringify(input.session_id)}`,
     } }) + '\n');
     return;
@@ -40,13 +41,13 @@ async function main() {
     if (event === 'UserPromptSubmit' && automated(input.prompt, summary.points)) {
       return;
     }
-    const entry = makeEvent({ session_id: input.session_id, prompt_id: input.prompt_id,
+    const entry = makeEvent({ session_id: input.session_id, prompt_id: codex ? input.turn_id : input.prompt_id,
       prompt: input.prompt, last_assistant_message: input.last_assistant_message }, event === 'Stop' ? 'response' : 'prompt');
     if (!entry && !(event === 'Stop' && summary.points)) return;
     if (entry) await enqueue(entry, config);
     if (summary.points) await recordTurn(config, input.session_id, entry, {
       prompt: event === 'UserPromptSubmit',
-      complete: event === 'Stop' && (input.background_tasks === undefined || Array.isArray(input.background_tasks) && !input.background_tasks.length),
+      complete: event === 'Stop' && (codex || input.background_tasks === undefined || Array.isArray(input.background_tasks) && !input.background_tasks.length),
     });
     try {
       const token = await loadToken(config);
@@ -60,15 +61,15 @@ async function main() {
     const config = await loadConfig();
     const token = await loadToken(config);
     if (!token) return;
-    try { await flush(config, token, { deadline: Math.min(deadline, Date.now() + 1800), max: 200 }); } catch {}
+    if (!codex) try { await flush(config, token, { deadline: Math.min(deadline, Date.now() + 1800), max: 200 }); } catch {}
     // The 750 ms request default aborts a cold TLS + D1 config read; the worker then never learns of pending work.
     const remote = await request(config, token, '/api/client/config', { deadline, timeout: deadline - Date.now() });
     const summary = { ...serverSummary(remote), instance_origin: config.instance_url };
     await writeJSON(pathFor('server-config.json'), summary);
     if (summary.notice) context.push('HMP プラグインの更新があります: claude plugin update hmp@hmp-marketplace');
-    if (!summary.points && !summary.paused && (summary.pending.extraction || summary.pending.lines)) await startWorker(config);
+    if (!codex && !summary.points && !summary.paused && (summary.pending.extraction || summary.pending.lines)) await startWorker(config);
   } finally {
-    if (context.length) process.stdout.write(JSON.stringify({ hookSpecificOutput: {
+    if (!codex && context.length) process.stdout.write(JSON.stringify({ hookSpecificOutput: {
       hookEventName: 'SessionStart', additionalContext: context.join('\n'),
     } }) + '\n');
   }

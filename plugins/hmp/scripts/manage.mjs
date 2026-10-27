@@ -6,6 +6,7 @@ import { manual, request } from './client.mjs';
 import { redact, spoolStatus } from './events.mjs';
 import { turnStatus } from './turns.mjs';
 import { verifyWorker } from './worker.mjs';
+import { codexHooks, restoreCodexHooks } from './codex-hooks.mjs';
 
 export async function changeFiles(changes) {
   for (const [name, value] of Object.entries(changes)) {
@@ -53,6 +54,10 @@ export async function changeFiles(changes) {
 }
 export async function manage(args) {
   const [command, ...rest] = args;
+  if (command === 'codex-hooks') {
+    if (rest.length !== 1) throw Error('usage');
+    return codexHooks(rest[0]);
+  }
   if (command === 'setup') {
     if (rest.length !== 2) throw Error('usage');
     const config = validateConfig({ instance_url: rest[0], device: rest[1] });
@@ -81,6 +86,7 @@ export async function manage(args) {
   if (command === 'restore') {
     if (!/^\d+-\d+$/.test(rest[0]) || rest.length !== 1) throw Error('invalid_backup');
     const before = await readJSON(pathFor(`backups/${rest[0]}.json`));
+    if (Object.keys(before).length === 1 && before.codex_hooks) return restoreCodexHooks(before.codex_hooks);
     // Missing originals become inert settings; restoration never deletes a file.
     const changes = {};
     for (const [name, value] of Object.entries(before)) {
