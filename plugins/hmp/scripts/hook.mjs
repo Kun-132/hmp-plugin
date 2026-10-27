@@ -17,6 +17,9 @@ async function startWorker(config) {
 }
 
 async function main() {
+  const codex = process.argv[3] === 'codex';
+  // Agent-written instructions must not become the person's words in HMP.
+  if (codex && process.env.CLAUDECODE !== undefined) return;
   const deadline = Date.now() + 3000;
   let text = '';
   process.stdin.setEncoding('utf8');
@@ -26,7 +29,6 @@ async function main() {
   }
   const input = JSON.parse(text);
   const event = process.argv[2];
-  const codex = process.argv[3] === 'codex';
   if (!['UserPromptSubmit', 'Stop', 'SessionStart'].includes(event)) return;
   if (await isOffrecord(input.session_id)) {
     if (event === 'SessionStart' && !codex) process.stdout.write(JSON.stringify({ hookSpecificOutput: {
