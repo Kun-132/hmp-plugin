@@ -1,4 +1,7 @@
 import { acquireFileLock, releaseFileLock } from './locks.mjs';
+import { lstat } from 'node:fs/promises';
+import { loadToken } from './config.mjs';
+import { request, serverSummary } from './client.mjs';
 import { hash, redact } from './events.mjs';
 import { isOffrecord } from './offrecord.mjs';
 import { pathFor, readJSON, writeJSON, publishJSON, filesIn, remove } from './state.mjs';
@@ -7,9 +10,31 @@ export const AUTOMATED_PREFIXES = Object.freeze(['<task-notification>', '[Subage
   'Another Claude session sent a message', '<side-sessions-event>', '<ci-monitor-event>', '[SYSTEM NOTIFICATION']);
 export const automated = (text, points) => typeof text === 'string' &&
   [...AUTOMATED_PREFIXES, ...(points?.automated_prefixes ?? [])].some(prefix => text.trimStart().startsWith(prefix));
-export async function cachedSummary(config) {
-  const cached = await readJSON(pathFor('server-config.json')).catch(() => ({}));
-  return cached.instance_origin && cached.instance_origin !== config.instance_url ? {} : cached;
+export async function cachedSummary(config, { deadline } = {}) {
+  const file = pathFor('server-config.json');
+  let cached = await readJSON(file).catch(() => ({}));
+  const current = () => cached?.instance_origin && cached.instance_origin !== config.instance_url ? {} : cached ?? {};
+  if (!(deadline > Date.now())) return current();
+  const modified = (await lstat(file).catch(() => null))?.mtimeMs ?? 0;
+  if (cached?.instance_origin === config.instance_url && Date.now() - modified <= 3600_000) return current();
+  try {
+    const lease = await acquireFileLock(pathFor('server-config-refresh.lock'), {
+      stale: owner => Date.now() - Date.parse(owner.started_at) > 10_000,
+    });
+    if (!lease) return current();
+    try {
+      const attempts = await readJSON(pathFor('server-config-refresh.json')).catch(() => ({}));
+      if (Date.now() - attempts[config.instance_url] < 3600_000 || Date.now() >= deadline) return current();
+      // Failed requests must not turn every prompt and Stop into another config fetch.
+      await writeJSON(pathFor('server-config-refresh.json'), { ...attempts, [config.instance_url]: Date.now() });
+      const token = await loadToken(config);
+      const remote = await request(config, token, '/api/client/config', { deadline, timeout: deadline - Date.now() });
+      const summary = { ...serverSummary(remote), instance_origin: config.instance_url };
+      await writeJSON(file, summary);
+      cached = summary;
+    } finally { await releaseFileLock(lease); }
+  } catch {}
+  return current();
 }
 const sessionName = (config, session) => hash(JSON.stringify([config.instance_url, session])) + '.json';
 export const turnName = turn => hash(JSON.stringify([turn.instance_origin, turn.session,

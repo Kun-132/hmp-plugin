@@ -17,7 +17,8 @@ test('prompt/Stop send only question/final answer, with stable ids and version',
   const f = await fixture(t);
   quiet(await f.hook('UserPromptSubmit', { tool_output: 'SYNTHETIC_TOOL', transcript_path: '/nonexistent' }));
   quiet(await f.hook('Stop', { tool_output: 'SYNTHETIC_TOOL' }));
-  const [prompt, response] = f.requests.map(r => r.body);
+  assert.deepEqual(f.requests.map(r => r.url), ['/api/client/config', '/api/client/events', '/api/client/events']);
+  const [prompt, response] = f.requests.filter(r => r.method === 'POST').map(r => r.body);
   assert.equal(prompt.client_version, '0.2.0'); assert.equal(prompt.device, 'synthetic-device');
   assert.equal(prompt.events[0].kind, 'prompt'); assert.equal(prompt.events[0].text, '合成の質問');
   assert.equal(response.events[0].kind, 'response'); assert.equal(response.events[0].text, '合成の最終回答');
@@ -30,7 +31,7 @@ test('prompt/Stop send only question/final answer, with stable ids and version',
   assert.ok(!JSON.stringify(f.requests).includes('SYNTHETIC_TOOL'));
   assert.equal((await f.names('spool')).length, 0);
   quiet(await f.hook('UserPromptSubmit'));
-  assert.equal(f.requests.length, 2); // Local receipt suppresses even a repeated Hook invocation.
+  assert.equal(f.requests.length, 3); // Local receipt suppresses even a repeated Hook invocation.
 });
 test('missing prompt_id uses stable content hash', async t => {
   const f = await fixture(t, { fail: true });
@@ -44,9 +45,9 @@ test('large Unicode text survives stdin chunk boundaries; oversized text fails o
   const input = Buffer.from(JSON.stringify({ cwd: f.project, session_id: 'synthetic-session', prompt_id: 'unicode', prompt }));
   const splits = [0, input.indexOf(Buffer.from('合')) + 1, input.indexOf(Buffer.from('🙂')) + 2, 32768, input.length];
   quiet(await f.run('hook.mjs', ['UserPromptSubmit'], splits.slice(1).map((end, i) => input.subarray(splits[i], end))));
-  assert.equal(f.requests[0].body.events[0].text, prompt);
+  assert.equal(f.requests.find(r => r.method === 'POST').body.events[0].text, prompt);
   quiet(await f.hook('UserPromptSubmit', { prompt_id: 'oversized', prompt: 'a'.repeat(100000) }));
-  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests.length, 2);
   assert.equal((await f.names('spool')).length, 0);
 });
 test('event size limit counts UTF-8 bytes, including the exact 64 KiB boundary', async t => {
@@ -54,9 +55,9 @@ test('event size limit counts UTF-8 bytes, including the exact 64 KiB boundary',
   const prompt = 'あ'.repeat(21845) + 'a';
   assert.equal(Buffer.byteLength(prompt), 64 * 1024);
   quiet(await f.hook('UserPromptSubmit', { prompt }));
-  assert.equal(f.requests[0].body.events[0].text, prompt);
+  assert.equal(f.requests.find(r => r.method === 'POST').body.events[0].text, prompt);
   quiet(await f.hook('UserPromptSubmit', { prompt_id: 'over-limit', prompt: prompt + 'a' }));
-  assert.equal(f.requests.length, 1); assert.equal((await f.names('spool')).length, 0);
+  assert.equal(f.requests.length, 2); assert.equal((await f.names('spool')).length, 0);
 });
 test('raw sessions survive spool replay; legacy hashed sessions remain unsent', async t => {
   const f = await fixture(t, { fail: true });
