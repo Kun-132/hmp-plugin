@@ -18,7 +18,7 @@ test('prompt/Stop send only question/final answer, with stable ids and version',
   quiet(await f.hook('UserPromptSubmit', { tool_output: 'SYNTHETIC_TOOL', transcript_path: '/nonexistent' }));
   quiet(await f.hook('Stop', { tool_output: 'SYNTHETIC_TOOL' }));
   const [prompt, response] = f.requests.map(r => r.body);
-  assert.equal(prompt.client_version, '0.2.0'); assert.equal(prompt.device, 'synthetic-device');
+  assert.equal(prompt.client_version, '0.1.3'); assert.equal(prompt.device, 'synthetic-device');
   assert.equal(prompt.events[0].kind, 'prompt'); assert.equal(prompt.events[0].text, '合成の質問');
   assert.equal(response.events[0].kind, 'response'); assert.equal(response.events[0].text, '合成の最終回答');
   assert.equal(prompt.events[0].session, 'synthetic-session');

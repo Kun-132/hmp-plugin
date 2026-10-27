@@ -12,7 +12,7 @@ export async function request(config, token, path, { body, deadline = Date.now()
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-HMP-Client-Version': CLIENT_VERSION },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
-    if (!response.ok && response.status !== 503) throw Error('http_error');
+    if (!response.ok) throw Error('http_error');
     let text = '', bytes = 0;
     const decoder = new TextDecoder();
     for await (const chunk of response.body) {
@@ -20,14 +20,7 @@ export async function request(config, token, path, { body, deadline = Date.now()
       if (bytes > 128 * 1024) { controller.abort(); throw Error('response_limit'); }
       text += decoder.decode(chunk, { stream: true });
     }
-    text += decoder.decode();
-    if (!response.ok) {
-      let sourcePaused = false;
-      try { sourcePaused = JSON.parse(text)?.error === 'client_source_paused'; } catch {}
-      if (sourcePaused) throw Object.assign(Error('client_source_paused'), { status: 503 });
-      throw Error('http_error');
-    }
-    return JSON.parse(text);
+    return JSON.parse(text + decoder.decode());
   } finally { clearTimeout(timer); }
 }
 export function serverSummary(value) {
@@ -39,14 +32,5 @@ export function serverSummary(value) {
   }
   return { pending: { extraction: count(value?.pending?.extraction), lines: count(value?.pending?.lines) },
     limits, paused: value?.paused === true || (Array.isArray(value?.paused_sources) && value.paused_sources.includes('claude_code_hook')),
-    notice: Boolean(value?.notice),
-    ...(typeof value?.instance_origin === 'string' ? { instance_origin: value.instance_origin } : {}),
-    ...(value?.points && typeof value.points === 'object' ? { points: {
-      backlog: count(value.points.backlog), contract_version: value.points.contract_version, instructions: value.points.instructions,
-      output_schema: value.points.output_schema,
-      automated_prefixes: Array.isArray(value.points.automated_prefixes)
-        ? value.points.automated_prefixes.filter(p => typeof p === 'string' && p.trim()).map(p => p.trim()) : [],
-      limits: value.points.limits && typeof value.points.limits === 'object' ? Object.fromEntries(
-        ['max_turns_per_day', 'max_turns_per_run', 'max_seconds_per_turn'].filter(k => k in value.points.limits).map(k => [k, value.points.limits[k]])) : {},
-    } } : {}) };
+    notice: Boolean(value?.notice) };
 }

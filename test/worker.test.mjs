@@ -10,8 +10,6 @@ const launchLog = `const fs = require('node:fs'); const p = require('node:path')
 fs.appendFileSync(p.join(process.env.HOME, 'launches.jsonl'), JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2),
   credential: Object.hasOwn(process.env, 'HMP_CLIENT_TOKEN'), extra: Object.hasOwn(process.env, 'UNTRUSTED_PROVIDER_OVERRIDE'),
   mcpOutput: process.env.MAX_MCP_OUTPUT_TOKENS, largeFiles: process.env.ENABLE_MCP_LARGE_OUTPUT_FILES }) + '\\n');
-process.stdout.write(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'submit',
-  name: process.argv.includes('mcp__hmp__claim_line_job') ? 'mcp__hmp__submit_line_blocks' : 'mcp__hmp__submit_extraction', input: {} }] } }) + '\\n');
 ${successfulClaude}`;
 const launchWithInit = init => launchLog.replace(successfulClaude,
   `process.stdout.write(${JSON.stringify(JSON.stringify(init) + '\n' + JSON.stringify(workerSuccess) + '\n')});`);
@@ -178,7 +176,7 @@ if (process.argv.includes(${JSON.stringify(LINE_TOOLS[0])})) {
 test('runClaude distinguishes missing stage tools from connection and execution failures', async t => {
   const f = await fixture(t, { claude: `process.stdout.write(${JSON.stringify(JSON.stringify(extractionWorkerInit) + '\n')}); setTimeout(() => {}, 30000);` });
   const result = await runClaude(f.project, LINE_TOOLS[0], 2000, { binary: join(f.bin, 'claude') });
-  assert.deepEqual(result, { status: 'stage_unavailable', lines: false, submits: 0 });
+  assert.deepEqual(result, { status: 'stage_unavailable', lines: false });
 });
 test('daily and lower item limits hold, zero prevents launch', async t => {
   const f = await fixture(t, { claude: launchLog });
@@ -208,18 +206,13 @@ test('an old CLI is refused before any work or daily allowance is consumed', asy
   await f.run('worker.mjs'); assert.equal((await readLaunches(f)).length, 0);
   await assert.rejects(stat(join(f.home, '.hmp/worker-usage.json')), { code: 'ENOENT' });
 });
-test('exclusive lock respects a live owner and reclaims a dead owner', async t => {
+test('exclusive lock permits only one concurrent worker; orphan lock fails closed', async t => {
   const f = await fixture(t, { claude: launchLog + 'setTimeout(() => {}, 300);' });
   await ready(f, { max_items_per_run: 1 });
   await Promise.all([f.run('worker.mjs'), f.run('worker.mjs')]);
   assert.equal((await readLaunches(f)).length, 1); assert.equal((await f.read('worker-usage.json')).runs, 1);
   await f.write('worker.lock', { pid: 999999999, started_at: new Date(0).toISOString() });
-  await f.run('worker.mjs'); assert.equal((await readLaunches(f)).length, 2);
-  const status = JSON.parse((await f.run('manage.mjs', ['status'])).stdout);
-  assert.equal(status.turns.last_failure, 'stale_lock_cleared');
-  await f.write('worker.lock', { pid: process.pid });
-  await f.run('worker.mjs'); assert.equal((await readLaunches(f)).length, 2);
-  assert.equal((await f.read('worker.lock')).pid, process.pid);
+  await f.run('worker.mjs'); assert.equal((await readLaunches(f)).length, 1);
 });
 test('unsafe MCP config and pause prevent any Claude launch', async t => {
   const f = await fixture(t, { claude: launchLog }); await ready(f);
@@ -241,7 +234,7 @@ setTimeout(() => fs.writeFileSync(p.join(process.env.HOME,'escaped'), 'synthetic
 test('wall-clock timeout kills process group without output', async t => {
   const f = await fixture(t, { claude: 'setTimeout(() => {}, 30000);' });
   const result = await runClaude(f.project, TOOLS[0], 50, { binary: join(f.bin, 'claude') });
-  assert.deepEqual(result, { status: 'failed', lines: false, submits: 0 });
+  assert.deepEqual(result, { status: 'failed', lines: false });
 });
 test('SessionStart pending launches detached worker using only sanitized cached config', async t => {
   const f = await fixture(t, { claude: launchLog,
