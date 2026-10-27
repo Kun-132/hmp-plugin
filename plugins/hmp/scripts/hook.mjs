@@ -3,8 +3,18 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, loadToken } from './config.mjs';
 import { suppressed, writeJSON, pathFor } from './state.mjs';
+import { automated, cachedSummary, recordTurn } from './turns.mjs';
 import { enqueue, flush, makeEvent } from './events.mjs';
 import { request, serverSummary } from './client.mjs';
+import { workerLocked } from './worker.mjs';
+
+async function startWorker(config) {
+  if (await workerLocked(config)) return;
+  const worker = spawn(process.execPath, [fileURLToPath(new URL('./worker.mjs', import.meta.url))], {
+    detached: true, stdio: 'ignore', env: process.env,
+  });
+  worker.on('error', () => {}); worker.unref();
+}
 
 async function main() {
   const deadline = Date.now() + 3000;
@@ -26,12 +36,22 @@ async function main() {
   if (await suppressed(input.cwd)) return;
   if (event !== 'SessionStart') {
     const config = await loadConfig();
+    const summary = await cachedSummary(config);
+    if (event === 'UserPromptSubmit' && automated(input.prompt, summary.points)) {
+      return;
+    }
     const entry = makeEvent({ session_id: input.session_id, prompt_id: input.prompt_id,
       prompt: input.prompt, last_assistant_message: input.last_assistant_message }, event === 'Stop' ? 'response' : 'prompt');
-    if (!entry) return;
-    await enqueue(entry, config);
-    const token = await loadToken(config);
-    await flush(config, token, { deadline, max: 50 });
+    if (!entry && !(event === 'Stop' && summary.points)) return;
+    if (entry) await enqueue(entry, config);
+    if (summary.points) await recordTurn(config, input.session_id, entry, {
+      prompt: event === 'UserPromptSubmit',
+      complete: event === 'Stop' && (input.background_tasks === undefined || Array.isArray(input.background_tasks) && !input.background_tasks.length),
+    });
+    try {
+      const token = await loadToken(config);
+      await flush(config, token, { deadline, max: 50 });
+    } finally { if (event === 'Stop' && summary.points && !summary.paused) await startWorker(config); }
     return;
   }
   const context = typeof input.session_id === 'string' && input.session_id
@@ -43,15 +63,10 @@ async function main() {
     try { await flush(config, token, { deadline: Math.min(deadline, Date.now() + 1800), max: 200 }); } catch {}
     // The 750 ms request default aborts a cold TLS + D1 config read; the worker then never learns of pending work.
     const remote = await request(config, token, '/api/client/config', { deadline, timeout: deadline - Date.now() });
-    const summary = serverSummary(remote);
+    const summary = { ...serverSummary(remote), instance_origin: config.instance_url };
     await writeJSON(pathFor('server-config.json'), summary);
     if (summary.notice) context.push('HMP プラグインの更新があります: claude plugin update hmp@hmp-marketplace');
-    if (!summary.paused && (summary.pending.extraction || summary.pending.lines)) {
-      const worker = spawn(process.execPath, [fileURLToPath(new URL('./worker.mjs', import.meta.url))], {
-        detached: true, stdio: 'ignore', env: process.env,
-      });
-      worker.on('error', () => {}); worker.unref();
-    }
+    if (!summary.points && !summary.paused && (summary.pending.extraction || summary.pending.lines)) await startWorker(config);
   } finally {
     if (context.length) process.stdout.write(JSON.stringify({ hookSpecificOutput: {
       hookEventName: 'SessionStart', additionalContext: context.join('\n'),

@@ -1,3 +1,71 @@
+# 0.2.0 の実装・検証記録
+
+2026-10-27。HMP 作業木の `EXPERIENCE_RULES.md`、`SPEC-experience-rules-impl.md`（プラグイン 0.2.0・実装に入るときに決めた細部）、`src/points.ts`・`src/client-api.ts`、文分割の `src/meaning.ts` を読み、参照元は変更していない。
+
+- `config.mjs`・README の契約版は 0.2.0。manifest の version は従来どおり省略。
+- `client.mjs` は配布された points 契約を保持し、Hook が origin を固定して保存する。`events.mjs` は受領印に capture_id を足す。
+- `turns.mjs` は固定＋追加の自動通知判定、origin/セッションごとの小さな状態、1ターン1ファイルの待ち、HMP と同じ番号付き文分割、本文なしの失敗コードを受け持つ。
+- `hook.mjs`・hooks.json は Stop を非同期化。背景の仕事がない Stop で待ちを作り、処理役を切り離す。points の契約がある SessionStart では重い抽出を起動しない。
+- `points-worker.mjs` は spool → capture ID → ツールなし Sonnet → 出力検査 → client/points の順に動く。受理と already_done だけで待ちを消す。失敗はコードと時刻だけを残し、次回再試行する。固定上限は300件/UTC日・10件/回・90秒/件。サーバーは下げる方向にだけ指定できる。
+- `worker.mjs` は共通ロックと既存の環境許可リストを使う。新経路の MCP は端末の待ちが空のときだけ、claim_turn/submit_points → claim_line_job/submit_line_blocks の順。各段の2ツールだけを許可し Read も拒否する。旧契約の起動・ツール・上限は従来どおり。
+- `offrecord.mjs`・`forget.mjs` は、そのセッションの待ちと状態も消す。`manage.mjs`・status/forget/pause の SKILL.md は表示と破棄対象を更新。
+
+実装で決めた細部：
+
+- HMP の usageSchema に合わせ、turn_ended_at は UTC のミリ秒、duration_ms は子の起動から終了までの実測値。tokens は CLI が返した数値だけを添える。
+- 300件の日次予算は端末共通。失敗・MCP の要点と線の試行も起動前に数え、10件/回と90秒/件を共通で適用する。
+- 同じ Stop の再実行で別の待ちを作らない。回答がなくても本人の言葉があるターンは処理する。空の Stop は状態を増やさない。
+- 現在の origin の待ちだけを status の turns に数える。最後の失敗は成功後も履歴として保持し、本文を持たせない。
+- 必要な capture ID がまだないターンは保留し、ほかの準備済みターンは進める。端末の待ちが1つでも残る間は MCP の待ちを取りに行かない。
+- 既存のロックがあれば Hook は子の起動を省く。排他の確定は worker.lock の排他作成で行い、残ったロックは自動奪取しない。
+
+`claude --help` で `-p`・`--model`・`--tools`・`--strict-mcp-config`・`--setting-sources`・`--settings`・`--no-session-persistence`・`--output-format`・`--json-schema` を確認済み。追加の `--disable-slash-commands`・`--no-chrome`・`--permission-mode`・`--permission-prompts` も存在する。代替フラグは不要。モデルの実呼出しはしていない。
+
+検証は一時 HOME、合成会話、偽 claude/security、ループバック HTTP（待受禁止時は既存のテスト専用 IPC）だけ。`test/points.test.mjs` に、自動通知、背景の仕事、文分割、capture ID と usage、失敗/時間切れ/5xx と再試行、忘却/オフレコ、環境変数遮断、日次/回/時間上限、MCP の順序・失敗分離、旧経路との切替、origin 分離、共通ロックのテストを追加した。実 HMP・実会話・実 keychain・実 ~/.claude は使っていない。commit・push・PR は行っていない。
+
+`npm test`：全122テスト成功（失敗0・スキップ0）。この環境ではループバック待受が EPERM のため、テスト専用 IPC へ自動切替した。実 TCP・実 MCP の通信成功は検証に含まない。`git diff --check` も成功。
+
+変更ファイル（22ファイル）：
+
+- `README.md`、`docs/IMPLEMENTATION.md`
+- `plugins/hmp/hooks/hooks.json`
+- `plugins/hmp/scripts/` の `client.mjs`、`config.mjs`、`events.mjs`、`forget.mjs`、`hook.mjs`、`manage.mjs`、`offrecord.mjs`、`worker.mjs`、新規 `points-worker.mjs`・`turns.mjs`
+- `plugins/hmp/skills/forget/SKILL.md`、`plugins/hmp/skills/pause/SKILL.md`、`plugins/hmp/skills/status/SKILL.md`
+- `test/helpers.mjs`、`test/forget.test.mjs`、`test/hook.test.mjs`、`test/manage-onboard.test.mjs`、`test/manifest.test.mjs`、新規 `test/points.test.mjs`
+
+追加テスト名（`test/points.test.mjs`、26件）：
+
+- `automated prefixes, including server additions, never spool, queue or send a prompt`
+- `automated notification clears an earlier human prompt and fixed prefixes also work without points`
+- `Stop queues only with absent or empty background tasks, stores redacted previous/prompt/response privately`
+- `sentence boundaries match HMP including decimal dots, whitespace, Unicode and 900 UTF-16 units`
+- `worker flushes events then submits structured points with capture IDs, sentences and numeric usage`
+- `claude_failed: raw receipts and queued turn survive, status is code-only, next launch retries`
+- `claude_timeout: raw receipts and queued turn survive, status is code-only, next launch retries`
+- `output_invalid: raw receipts and queued turn survive, status is code-only, next launch retries`
+- `points_unavailable: raw receipts and queued turn survive, status is code-only, next launch retries`
+- `event 5xx leaves both spool and turn intact; a later run flushes and succeeds`
+- `already_done completes a turn; other receipt statuses preserve it`
+- `offrecord and confirmed forget remove only that session state/turns, across origins`
+- `pause creates no spool, turn or session state`
+- `ignore creates no spool, turn or session state`
+- `remote-pause creates no spool, turn or session state`
+- `points limits can only lower hard maxima; daily and run limits count failures before launch and reset by UTC`
+- `JSON output validation and isolated CLI args reject malformed output`
+- `tool-free timeout kills the process group and returns only the reason code`
+- `pending server work runs only after local turns, points before lines, with exactly two MCP tools`
+- `MCP OAuth failure stays in its stage and cannot block a subsequent local turn`
+- `a missing capture leaves that turn, processes later ready turns, and suppresses MCP until drained`
+- `SessionStart caches server contract/prefixes but never starts points work; legacy path stays unchanged`
+- `turns, session state and config cannot cross instance origins`
+- `verify selects the points pair on contract instances without claiming a turn`
+- `a prompt-only Stop queues available parts and empty Stops create no state`
+- `points workers share the exclusive lock and preserve per-session previous capture IDs`
+
+以下は過去の版の記録。
+
+---
+
 # 初版 0.1.0 の実装・検証記録
 
 2026-10-24。作業開始時は空の main ブランチ、未コミット変更なし。設計 `JUDGMENT_LINES_THREE_TIERS_DRAFT.md` §18 全体を読み、既存 `extraction-launchd/worker.mjs` の部分 stream 監視・環境隔離と `conversation-capture-v2/contract.py` の最小伏せ字を参照した。参照元は変更していない。

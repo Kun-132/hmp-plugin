@@ -4,6 +4,7 @@ import { loadConfig, loadToken, validateConfig, validateMcp, bindCredentials, CL
 import { readJSON, writeJSON, pathFor } from './state.mjs';
 import { manual, request } from './client.mjs';
 import { redact, spoolStatus } from './events.mjs';
+import { turnStatus } from './turns.mjs';
 import { verifyWorker } from './worker.mjs';
 
 export async function changeFiles(changes) {
@@ -65,7 +66,7 @@ export async function manage(args) {
     const config = await loadConfig(), token = await loadToken(config);
     const remote = await request(config, token, '/api/client/config', manual());
     const label = typeof remote.instance_label === 'string' ? remote.instance_label : '';
-    const worker = await verifyWorker();
+    const worker = await verifyWorker(remote.points ? 'points' : 'legacy');
     return { instance_label: redact(label.split(token).join('<SECRET>')).replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, 80), connected: true, worker };
   }
   if (command === 'status') {
@@ -75,7 +76,7 @@ export async function manage(args) {
     const config = await loadConfig(), token = await loadToken(config);
     try { pending = (await import('./client.mjs')).serverSummary(await request(config, token, '/api/client/config', manual())).pending; } catch {}
     return { client_version: CLIENT_VERSION, ...await spoolStatus(config),
-      last_send: last?.sent_at ?? null, pending };
+      last_send: last?.sent_at ?? null, turns: await turnStatus(config), pending };
   }
   if (command === 'restore') {
     if (!/^\d+-\d+$/.test(rest[0]) || rest.length !== 1) throw Error('invalid_backup');
