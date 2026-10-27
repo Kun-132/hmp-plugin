@@ -207,7 +207,7 @@ test('each accepted local turn adds numeric stats without text, IDs or sessions'
     assert.equal(sample.turn_to_accepted_ms, sample.accepted_at - submitted.usage.turn_ended_at);
     assert.equal(sample.duration_ms, submitted.usage.duration_ms);
     assert.deepEqual({ ...sample, accepted_at: 0, turn_to_accepted_ms: 0, duration_ms: 0 },
-      { accepted_at: 0, turn_to_accepted_ms: 0, duration_ms: 0, input_tokens: 2, cache_creation_input_tokens: 100,
+      { engine: 'claude', accepted_at: 0, turn_to_accepted_ms: 0, duration_ms: 0, input_tokens: 2, cache_creation_input_tokens: 100,
         cache_read_input_tokens: 200, input_total_tokens: 302, output_tokens: 45, written: 1, dropped: 3,
         dropped_by_reason: { duplicate: 2, invalid: 1 } });
     assert.equal((await stat(join(f.home, '.hmp/points-stats.json'))).mode & 0o777, 0o600);

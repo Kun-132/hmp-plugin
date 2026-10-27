@@ -17,6 +17,10 @@ function pointRow(value) {
     return row ? { path: 'mcp', ...row } : null;
   }
   const row = numericRow(value, ['accepted_at', 'turn_to_accepted_ms', 'duration_ms', 'written', 'dropped'], tokenFields);
+  if (value && Object.hasOwn(value, 'engine')) {
+    if (!['claude', 'codex'].includes(value.engine)) return null;
+    if (row) row.engine = value.engine;
+  }
   if (row && value.dropped_by_reason) row.dropped_by_reason = reasonCounts(value.dropped_by_reason);
   return row;
 }
@@ -32,7 +36,7 @@ async function append(file, origin, row, clean, limit) {
   await writeJSON(pathFor(file), values);
 }
 export async function recordPointsStats(config, { accepted_at, turn_ended_at, usage, written, dropped }) {
-  const row = pointRow({ accepted_at, turn_to_accepted_ms: Math.max(0, accepted_at - turn_ended_at),
+  const row = pointRow({ engine: config.engine ?? 'claude', accepted_at, turn_to_accepted_ms: Math.max(0, accepted_at - turn_ended_at),
     duration_ms: usage?.duration_ms, ...Object.fromEntries(tokenFields.map(key => [key, usage?.[key]])),
     written: count(written) ? written : 0,
     dropped: Object.values(dropped ?? {}).filter(count).reduce((sum, n) => sum + n, 0),
@@ -68,7 +72,9 @@ function summarize(rows) {
 export async function pointsStats(config, now = Date.now()) {
   const rows = (await histories('points-stats.json', pointRow, 500))[config.instance_url] ?? [];
   const terminal = rows.filter(row => row.path !== 'mcp'), mcp = rows.filter(row => row.path === 'mcp');
-  return { last_24h: summarize(terminal.filter(row => row.accepted_at >= now - 86400_000 && row.accepted_at <= now)), all: summarize(terminal),
+  const summary = values => ({ last_24h: summarize(values.filter(row => row.accepted_at >= now - 86400_000 && row.accepted_at <= now)), all: summarize(values) });
+  return { ...summary(terminal),
+    by_engine: Object.fromEntries(['claude', 'codex'].map(engine => [engine, summary(terminal.filter(row => (row.engine ?? 'claude') === engine))])),
     mcp: { last_24h: usageSummary(mcp.filter(row => row.at >= now - 86400_000 && row.at <= now)), all: usageSummary(mcp) } };
 }
 export async function recordBacklog(config, summary, at = Date.now()) {
