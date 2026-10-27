@@ -38,6 +38,9 @@ export async function discardSessionFiles(session) {
     if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
     const file = pathFor(`${dir}/${name}`);
     const entry = await readJSON(file).catch(() => null);
-    if (entry?.session === session) await remove(file);
+    if (entry?.session === session) {
+      await remove(file);
+      if (dir === 'turns') await remove(pathFor('turn-retries/' + name));
+    }
   }
 }

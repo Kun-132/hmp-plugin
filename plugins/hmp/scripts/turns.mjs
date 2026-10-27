@@ -1,3 +1,4 @@
+import { acquireFileLock, releaseFileLock } from './locks.mjs';
 import { hash, redact } from './events.mjs';
 import { isOffrecord } from './offrecord.mjs';
 import { pathFor, readJSON, writeJSON, publishJSON, filesIn, remove } from './state.mjs';
@@ -14,29 +15,46 @@ const sessionName = (config, session) => hash(JSON.stringify([config.instance_ur
 export const turnName = turn => hash(JSON.stringify([turn.instance_origin, turn.session,
   turn.prompt?.client_event_id, turn.response?.client_event_id])) + '.json';
 const part = event => ({ client_event_id: event.client_event_id, text: redact(event.text) });
-export async function recordTurn(config, session, event, { prompt = false, complete = false } = {}) {
+export async function recordTurn(config, session, event, { prompt = false, complete = false, promptId } = {}) {
   if (typeof session !== 'string' || !session || await isOffrecord(session)) return;
   const file = pathFor('sessions/' + sessionName(config, session));
-  const state = await readJSON(file).catch(e => { if (e.code === 'ENOENT') return {}; throw e; });
-  if (prompt) {
-    if (event) state.prompt = part(event);
-    else { if (!state.prompt) return; delete state.prompt; }
-  } else {
-    const identity = event?.client_event_id ?? state.prompt?.client_event_id;
-    if (!identity || state.completed_turn === identity) return;
-    if (complete) {
-      const turn = { instance_origin: config.instance_url, session, turn_ended_at: Date.now(),
-        ...(state.response ? { previous: state.response } : {}), ...(state.prompt ? { prompt: state.prompt } : {}), ...(event ? { response: part(event) } : {}) };
-      const queued = pathFor('turns/' + turnName(turn));
-      try { await publishJSON(queued, turn); } catch (e) { if (e.code !== 'EEXIST') throw e; }
-      if (await isOffrecord(session)) await remove(queued);
-      state.completed_turn = identity;
-      delete state.prompt;
+  const lease = await acquireFileLock(file + '.lock', { wait: 600,
+    stale: owner => Date.now() - Date.parse(owner.started_at) > 10_000 });
+  if (!lease) throw Error('session_busy');
+  try {
+    if (await isOffrecord(session)) return;
+    const state = await readJSON(file).catch(e => { if (e.code === 'ENOENT') return {}; throw e; });
+    const prompts = state.prompts ?? (state.prompt ? [state.prompt] : []);
+    delete state.prompt;
+    const matchId = typeof promptId === 'string' && promptId ? hash(promptId) : undefined;
+    if (prompt) {
+      if (event && !prompts.some(p => p.client_event_id === event.client_event_id))
+        prompts.push({ ...part(event), recorded_at: Date.now(), ...(matchId ? { match_id: matchId } : {}) });
+    } else {
+      const exact = matchId ? prompts.findIndex(p => p.match_id === matchId) : -1;
+      const index = exact >= 0 ? exact : prompts.findIndex(p => !matchId || !p.match_id);
+      const selected = prompts[index];
+      if (!event && !selected) return;
+      const identity = hash(JSON.stringify([selected?.client_event_id, event?.client_event_id]));
+      if (state.completed_turn === identity || !selected && state.completed_response === event?.client_event_id) return;
+      if (complete) {
+        const turn = { instance_origin: config.instance_url, session, turn_ended_at: Date.now(),
+          ...(state.response ? { previous: state.response } : {}), ...(selected ? { prompt: part(selected) } : {}),
+          ...(event ? { response: part(event) } : {}) };
+        const queued = pathFor('turns/' + turnName(turn));
+        try { await publishJSON(queued, turn); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+        if (await isOffrecord(session)) await remove(queued);
+        state.completed_turn = identity;
+        state.completed_response = event?.client_event_id;
+        if (index >= 0) prompts.splice(index, 1);
+      }
+      if (event) state.response = part(event);
     }
-    if (event) state.response = part(event);
-  }
-  await writeJSON(file, { ...state, instance_origin: config.instance_url, session });
-  if (await isOffrecord(session)) await remove(file);
+    const now = Date.now();
+    await writeJSON(file, { ...state, prompts: prompts.map(p => ({ ...p, recorded_at: p.recorded_at ?? now }))
+      .filter(p => p.recorded_at >= now - 86400_000).slice(-8), instance_origin: config.instance_url, session });
+    if (await isOffrecord(session)) await remove(file);
+  } finally { await releaseFileLock(lease); }
 }
 export async function queuedTurns(config) {
   const turns = [];
@@ -53,6 +71,22 @@ export async function queuedTurns(config) {
   }
   return turns.sort((a, b) => a.turn.turn_ended_at - b.turn.turn_ended_at || a.name.localeCompare(b.name));
 }
+export const retryPath = name => pathFor('turn-retries/' + name);
+export async function readyTurns(config) {
+  const ready = [];
+  for (const entry of await queuedTurns(config)) {
+    const retry = await readJSON(retryPath(entry.name)).catch(e => { if (e.code === 'ENOENT') return null; throw e; });
+    if (Date.now() - entry.turn.turn_ended_at >= 7 * 86400_000 || !(retry?.next_retry_at > Date.now())) ready.push(entry);
+  }
+  return ready;
+}
+export async function deferTurn(config, name, code) {
+  const retry = await readJSON(retryPath(name)).catch(e => { if (e.code === 'ENOENT') return {}; throw e; });
+  const attempts = Number.isSafeInteger(retry.attempts) && retry.attempts >= 0 ? retry.attempts + 1 : 1;
+  const minutes = [5, 30, 120, 360, 1440][Math.min(attempts - 1, 4)];
+  await writeJSON(retryPath(name), { attempts, next_retry_at: Date.now() + minutes * 60_000, code });
+  await recordFailure(config, code);
+}
 export const failurePath = config => pathFor('points-failure-' + hash(config.instance_url) + '.json');
 export async function turnStatus(config) {
   const queue = await queuedTurns(config);
@@ -61,7 +95,7 @@ export async function turnStatus(config) {
     last_failure: FAILURE_CODES.includes(failure?.code) ? failure.code : null };
 }
 export const FAILURE_CODES = Object.freeze(['stale_lock_cleared', 'events_unavailable', 'capture_pending', 'contract_invalid', 'claude_failed',
-  'claude_timeout', 'output_invalid', 'points_unavailable', 'points_rejected', 'daily_limit', 'mcp_failed']);
+  'claude_timeout', 'output_invalid', 'points_unavailable', 'points_rejected', 'daily_limit', 'mcp_failed', 'turn_expired']);
 export async function recordFailure(config, code) {
   if (!FAILURE_CODES.includes(code)) throw Error('invalid_failure');
   await writeJSON(failurePath(config), { code, at: Date.now() });

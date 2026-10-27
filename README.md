@@ -82,21 +82,21 @@ claude --strict-mcp-config --mcp-config "$HOME/.hmp/mcp.json" \
 
 部分 stream の tool header と完成 input を監視し、許可外ツール、範囲外 Read（実体パスも確認）、2回目の claim、4回目の submit でプロセスグループを即終了します。stream 監視は Claude Code の権限制御に加える安全装置です。Read 境界設定に対応する Claude Code **2.1.309 以上**を必要とし、それより古い版では処理役を起動しません。
 
-1日24起動・1回8件・20分を殻に固定し、`config.limits.{max_runs_per_day,max_items_per_run,max_minutes}` と小さい方を使います。0は無効化、不正値は0。1件ごとに別の Claude を起動し、1回の claim と最大3回の submit を許可します。日付は UTC、起動前に回数を記録し、失敗しても返却しません。各 Claude の接続・ツール公開・成功 result を監視し、未認証・欠けたツール・異常 result・空の exit 0 では次の項目へ進みません。`worker.lock` を排他作成します。異常終了で残ったロックは自動奪取せず、本人が処理役の停止を確認してから解除してください。
+1日24起動・1回8件・20分を殻に固定し、`config.limits.{max_runs_per_day,max_items_per_run,max_minutes}` と小さい方を使います。0は無効化、不正値は0。1件ごとに別の Claude を起動し、1回の claim と最大3回の submit を許可します。日付は UTC、起動前に回数を記録し、失敗しても返却しません。各 Claude の接続・ツール公開・成功 result を監視し、未認証・欠けたツール・異常 result・空の exit 0 では次の項目へ進みません。`worker.lock` を排他作成します。停止済み PID のロックは一意の名前へ移して所有者を確かめてから回収し、新しい所有者のロックは消しません。各ターンの前にも所有権を確認します。
 
 ## 0.2.0 のターン処理
 
 `/api/client/config` に `points` があれば、SessionStart は設定の取得と原文の再送だけを行い、重い抽出を起動しません。`Stop` は `async: true`。最終回答を spool に置き、`background_tasks` が未指定か空配列のときだけ、ターンを `~/.hmp/turns/` に置いて処理役を切り離します。背景の仕事がある場合も最終回答の原文は送ります。
 
-`~/.hmp/sessions/` は、origin とセッションごとに直前の最終回答・現在の本人の言葉を少量だけ持ちます。待ちには、存在する部分（直前の答え・本人の言葉・今回の答え）の client_event_id、伏せ字済み本文、セッション、終了時刻を持ちます。spool と同じく origin を固定し、ディレクトリ0700・ファイル0600です。接続先を変えても別 origin の状態・待ちは使いません。一時停止・`.hmp-ignore`・オフレコ中は作りません。
+`~/.hmp/sessions/` は、origin とセッションごとに直前の最終回答・まだ閉じていない本人の言葉を順番に持ちます。Stop と入力の両方に識別子があれば一致するものを、片方になければ古い順に組みます。背景の仕事が残る Stop は回答だけを覚えます。状態の更新にはセッションごとの短いロックを使います。待ちには、存在する部分（直前の答え・本人の言葉・今回の答え）の client_event_id、伏せ字済み本文、セッション、終了時刻を持ちます。spool と同じく origin を固定し、ディレクトリ0700・ファイル0600です。接続先を変えても別 origin の状態・待ちは使いません。一時停止・`.hmp-ignore`・オフレコ中は作りません。
 
 処理役は共通の `worker.lock` で端末に1つだけです。先に spool を送信し、送信済みの印から各部分の capture ID を引きます。足りないターンは待ちに残して次へ進みます。文は HMP の `sourceSpans` と同じ規則（`。！？!?`・改行、空白または末尾が続く `.`、900 UTF-16 単位、空白だけを除外）で分割し、部分名と全体の通し番号を付けます。
 
 子の起動は `claude -p --model sonnet --tools "" --strict-mcp-config --setting-sources "" --settings '{"disableAllHooks":true,"enabledPlugins":{}}' --no-session-persistence --output-format json --json-schema <output_schema>`。スキル・Chrome も無効にし、固定の system prompt で境界を保ち、抽出基準としての配布 instructions と、信頼できないデータとして囲った番号付きの文だけを標準入力に渡します。ツール・MCP 接続は与えません。子の環境は既存の `claudeEnv()` の許可リストだけで、`ANTHROPIC_API_KEY`・端末トークン・provider の設定は渡しません。
 
-構造化出力を配布 schema と要点の形で検査し、端末トークンで `/api/client/points` に送ります。model は `sonnet`、usage は入力・出力 tokens（CLI が返した場合）、実測の duration_ms、UTC ミリ秒の turn_ended_at です。`accepted` / `already_done` だけで待ちを消します。失敗時は固定コードと時刻だけを別の状態に記録し、原文の送信済みの印とターンを残し、次の Stop で古い順に再試行します。モデルの出力・標準エラーは保存しません。
+構造化出力を配布 schema と要点の形で検査し、端末トークンで `/api/client/points` に送ります。model は `sonnet`、usage は入力・出力 tokens（CLI が返した場合）、実測の duration_ms、UTC ミリ秒の turn_ended_at です。`accepted` / `already_done` だけで待ちを消します。失敗時は固定コードに加えて、本文なしの試行回数・次回時刻を `turn-retries/` に記録します。5分・30分・2時間・6時間・以後1日の間隔をあけ、待機中のターンを飛ばして後続を処理します。原文の送信済みの印とターンは残し、7日を過ぎたターンは端末の待ちから外して `turn_expired` を記録します。原文と未処理の待ちは HMP 側に残ります。モデルの出力・標準エラーは保存しません。
 
-上限は **UTC 1日300件・1回10件・1件90秒**と `points.limits` の小さい方です。0は停止、不正値も0。試行前に `points-usage.json` に数え、失敗でも返却しません。日付が変われば再開します。待ちが空になり、MCP 設定の検査が通り、HMP に待ちがあれば、`claim_turn` / `submit_points` を先に、その後 `claim_line_job` / `submit_line_blocks` を処理します。この起動も同じ件数・日次・時間の枠を使い、各段の2ツールだけを許して stream を監視します。Read は許しません。MCP の失敗や OAuth 切れは端末のターン処理を止めません。常駐はしません。
+上限は **UTC 1日300件・1回10件・1件90秒**と `points.limits` の小さい方です。0は停止、不正値も0。試行前に `points-usage.json` に数え、失敗でも返却しません。日付が変われば再開します。すぐ処理できる端末の待ちを処理した後、同じ処理役で `/api/client/config` を取り直し、MCP 設定の検査が通り、`points.backlog` または `pending.lines` が1以上なら、`claim_turn` / `submit_points` を先に、その後 `claim_line_job` / `submit_line_blocks` を処理します。この起動も同じ件数・日次・時間の枠を使い、各段の2ツールだけを許して stream を監視します。Read は許しません。config を取り直せないときは MCP を起動しません。HMP の `claim_turn` は30分以上前の記録だけが対象です。空の claim（submit 0回）が出た段は、その処理役では再起動しません。MCP の失敗や OAuth 切れは端末のターン処理を止めません。処理中も待ちを取り直し、解除後の到着には残り予算で1回だけ再起動します。各ターンの Claude 起動前と要点送信前に一時停止・そのセッションのオフレコを再確認します。一時停止では待ちを残し、オフレコではそのセッションの待ちを捨てます。ここでは Hook が確認済みの `.hmp-ignore` を再判定しません。常駐はしません。
 
 ## 設定変更と戻し方
 

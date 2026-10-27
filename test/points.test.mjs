@@ -38,6 +38,9 @@ async function seed(t, options = {}) {
 async function launches(f) {
   return (await readFile(join(f.home, 'points-launches.jsonl'), 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(s => JSON.parse(s));
 }
+async function retryNow(f) {
+  for (const name of await f.names('turn-retries')) await f.write('turn-retries/' + name, { ...await f.read('turn-retries/' + name), next_retry_at: 0 });
+}
 const lastCode = async f => ok(await f.run('manage.mjs', ['status'])).turns.last_failure;
 
 test('automated prefixes, including server additions, never spool, queue or send a prompt', async t => {
@@ -60,13 +63,13 @@ test('automated notifications preserve the human prompt through background work'
   const f = await fixture(t, { noToken: true });
   await cached(f); await f.write('worker.lock', { pid: process.pid });
   await f.hook('UserPromptSubmit', { prompt_id: 'human', prompt: '本人の言葉' });
-  await f.hook('Stop', { prompt_id: 'first', last_assistant_message: '1回目の答え', background_tasks: ['running'] });
+  await f.hook('Stop', { prompt_id: undefined, last_assistant_message: '1回目の答え', background_tasks: ['running'] });
   assert.equal((await f.names('turns')).length, 0);
   const name = (await f.names('sessions'))[0];
   const before = await readFile(join(f.home, '.hmp/sessions', name), 'utf8');
   await f.hook('UserPromptSubmit', { prompt_id: 'auto', prompt: '<task-notification>合成' });
   assert.equal(await readFile(join(f.home, '.hmp/sessions', name), 'utf8'), before);
-  await f.hook('Stop', { prompt_id: 'second', last_assistant_message: '2回目の答え', background_tasks: [] });
+  await f.hook('Stop', { prompt_id: undefined, last_assistant_message: '2回目の答え', background_tasks: [] });
   const turn = await f.read('turns/' + (await f.names('turns'))[0]);
   assert.equal(turn.previous.text, '1回目の答え');
   assert.equal(turn.prompt.text, '本人の言葉'); assert.equal(turn.response.text, '2回目の答え');
@@ -106,7 +109,7 @@ test('worker flushes events then submits structured points with capture IDs, sen
   await f.setCredentials({ 'synthetic-device@127.0.0.1': 'synthetic' }); f.env.HMP_CLIENT_TOKEN = 'synthetic';
   f.env.ANTHROPIC_API_KEY = 'SYNTHETIC_FORBIDDEN_KEY';
   ok(await f.run('worker.mjs'));
-  assert.deepEqual(f.requests.map(r => r.url), ['/api/client/events', '/api/client/points']);
+  assert.deepEqual(f.requests.map(r => r.url), ['/api/client/events', '/api/client/points', '/api/client/config']);
   const events = f.requests[0].body.events, body = f.requests[1].body;
   assert.deepEqual(body.turn, Object.fromEntries(events.map(e => [e.kind, 'cap_' + e.client_event_id.slice(4)])));
   assert.deepEqual(body.sentences, [{ n: 1, part: 'prompt', text: '合成の判断。' }, { n: 2, part: 'prompt', text: '次へ!' }, { n: 3, part: 'response', text: '合成の回答。' }]);
@@ -121,7 +124,7 @@ test('worker flushes events then submits structured points with capture IDs, sen
   const input = await readFile(join(f.home, 'points-input'), 'utf8'); assert.ok(input.includes(contract.instructions)); assert.ok(input.includes('UNTRUSTED_TURN_'));
 });
 for (const mode of ['claude_failed', 'claude_timeout', 'output_invalid', 'points_unavailable']) {
-  test(`${mode}: raw receipts and queued turn survive, status is code-only, next launch retries`, async t => {
+  test(`${mode}: raw receipts and queued turn survive, status is code-only, retries after cooldown`, async t => {
     const f = await seed(t);
     if (mode === 'points_unavailable') f.state.pointsFail = true;
     else {
@@ -141,6 +144,8 @@ for (const mode of ['claude_failed', 'claude_timeout', 'output_invalid', 'points
     assert.ok(!JSON.stringify(metadata).includes('SYNTHETIC_PRIVATE_ERROR'));
     f.state.pointsFail = false;
     await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\n${fake}`, { mode: 0o700 });
+    ok(await f.run('worker.mjs')); assert.equal((await f.names('turns')).length, 1);
+    await retryNow(f);
     ok(await f.run('worker.mjs')); assert.equal((await f.names('turns')).length, 0);
   });
 }
@@ -148,13 +153,13 @@ test('event 5xx leaves both spool and turn intact; a later run flushes and succe
   const f = await seed(t, { fail: true });
   ok(await f.run('worker.mjs'));
   assert.equal((await f.names('spool')).length, 2); assert.equal((await f.names('turns')).length, 1); assert.equal((await launches(f)).length, 0);
-  f.state.fail = false; ok(await f.run('worker.mjs'));
+  f.state.fail = false; await retryNow(f); ok(await f.run('worker.mjs'));
   assert.equal((await f.names('spool')).length, 0); assert.equal((await f.names('turns')).length, 0);
 });
 test('already_done completes a turn; other receipt statuses preserve it', async t => {
   const f = await seed(t); f.state.pointsReceipt = { status: 'turn_skipped', written: 0, dropped: {} };
   ok(await f.run('worker.mjs')); assert.equal((await f.names('turns')).length, 1); assert.equal(await lastCode(f), 'points_rejected');
-  f.state.pointsReceipt.status = 'already_done'; ok(await f.run('worker.mjs')); assert.equal((await f.names('turns')).length, 0);
+  f.state.pointsReceipt.status = 'already_done'; await retryNow(f); ok(await f.run('worker.mjs')); assert.equal((await f.names('turns')).length, 0);
 });
 test('offrecord and confirmed forget remove only that session state/turns, across origins', async t => {
   const f = await seed(t); await f.write('worker.lock', { pid: process.pid });
@@ -229,6 +234,7 @@ process.stdout.write(JSON.stringify({ type: 'assistant', message: { content: [{ 
 process.stdout.write(${JSON.stringify(JSON.stringify(success) + '\n')}); }`;
   await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\n${script}`, { mode: 0o700 });
   await cached(f, { max_turns_per_run: 4 }, { extraction: 2, lines: 3 });
+  f.state.remote = { points: { ...contract, backlog: 2 }, pending: { lines: 3 } };
   ok(await f.run('worker.mjs'));
   const calls = await launches(f);
   assert.equal(calls.length, 4); assert.ok(calls[0].args.includes('--json-schema'));
@@ -243,12 +249,13 @@ process.stdout.write(${JSON.stringify(JSON.stringify(success) + '\n')}); }`;
 test('MCP OAuth failure stays in its stage and cannot block a subsequent local turn', async t => {
   const f = await seed(t);
   await cached(f, {}, { extraction: 2 });
+  f.state.remote = { points: { ...contract, backlog: 2 } };
   // The fake model emits a non-stream result for MCP, so its connection check fails.
   ok(await f.run('worker.mjs')); assert.equal((await f.names('turns')).length, 0); assert.equal(await lastCode(f), 'mcp_failed');
   await f.write('worker.lock', { pid: process.pid });
   await f.hook('UserPromptSubmit', { prompt_id: 'later' }); await f.hook('Stop', { prompt_id: 'later' });
   await rm(join(f.home, '.hmp/worker.lock'));
-  await cached(f); await f.write('mcp.json', { mcpServers: { evil: { command: 'false' } } });
+  await cached(f); f.state.remote = {}; await f.write('mcp.json', { mcpServers: { evil: { command: 'false' } } });
   ok(await f.run('worker.mjs')); assert.equal((await f.names('turns')).length, 0);
   assert.equal(f.requests.filter(r => r.url === '/api/client/points').length, 2);
 });
@@ -315,4 +322,237 @@ test('points workers share the exclusive lock and preserve per-session previous 
   const posts = f.requests.filter(r => r.url === '/api/client/points'); assert.equal(posts.length, 2);
   assert.equal(posts[1].body.turn.previous, posts[0].body.turn.response);
   assert.equal(posts[1].body.sentences[0].part, 'previous'); assert.equal(posts[1].body.sentences[0].text, '合成の回答。');
+});
+
+test('R1: async Stops pair by explicit ID or FIFO and concurrent prompts survive', async t => {
+  for (const ids of [true, false]) {
+    const f = await fixture(t, { noToken: true }); await cached(f); await f.write('worker.lock', { pid: process.pid });
+    const id = n => ({ prompt_id: ids ? n : undefined });
+    await f.hook('UserPromptSubmit', { ...id('p1'), prompt: 'P1' });
+    await f.hook('UserPromptSubmit', { ...id('p2'), prompt: 'P2' });
+    await f.hook('Stop', { ...id('p1'), last_assistant_message: 'R1', background_tasks: ['running'] });
+    assert.equal((await f.names('turns')).length, 0);
+    await f.hook('Stop', { ...id('p1'), last_assistant_message: 'R1' });
+    await f.hook('Stop', { ...id('p2'), last_assistant_message: 'R2' });
+    const turns = await Promise.all((await f.names('turns')).map(n => f.read('turns/' + n)));
+    assert.deepEqual(turns.map(v => [v.prompt?.text, v.response?.text]).sort(), [['P1', 'R1'], ['P2', 'R2']]);
+  }
+  const f = await fixture(t, { noToken: true }); await cached(f); await f.write('worker.lock', { pid: process.pid });
+  await Promise.all(Array.from({ length: 8 }, (_, i) => f.hook('UserPromptSubmit', { prompt_id: 'p' + i, prompt: 'P' + i })));
+  for (let i = 7; i >= 0; i--) await f.hook('Stop', { prompt_id: 'p' + i, last_assistant_message: 'R' + i });
+  const turns = await Promise.all((await f.names('turns')).map(n => f.read('turns/' + n)));
+  assert.equal(turns.length, 8);
+  assert.ok(turns.every(v => v.prompt?.text.slice(1) === v.response?.text.slice(1)));
+});
+
+test('R2: identical answers with different human prompts close distinct turns', async t => {
+  const f = await fixture(t, { noToken: true }); await cached(f); await f.write('worker.lock', { pid: process.pid });
+  for (const prompt of ['P1', 'P2']) {
+    await f.hook('UserPromptSubmit', { prompt_id: prompt, prompt });
+    await f.hook('Stop', { prompt_id: undefined, last_assistant_message: '同じ回答' });
+    await f.hook('Stop', { prompt_id: undefined, last_assistant_message: '同じ回答' });
+  }
+  const turns = await Promise.all((await f.names('turns')).map(n => f.read('turns/' + n)));
+  assert.equal(turns.length, 2); assert.deepEqual(turns.map(v => v.prompt?.text).sort(), ['P1', 'P2']);
+});
+
+const mcpFake = `const fs = require('node:fs');
+fs.appendFileSync(process.env.HOME + '/points-launches.jsonl', JSON.stringify({ args: process.argv.slice(2) }) + '\\n');
+process.stdout.write(${JSON.stringify(JSON.stringify({ type: 'system', subtype: 'init', mcp_servers: [{ name: 'hmp', status: 'connected' }], tools: [...POINT_TOOLS, ...LINE_TOOLS] }) + '\n')});
+const name = process.argv.includes('${POINT_TOOLS[0]}') ? '${POINT_TOOLS[1]}' : '${LINE_TOOLS[1]}';
+process.stdout.write(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'submit', name, input: {} }] } }) + '\\n');
+process.stdout.write(${JSON.stringify(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }) + '\n')});`;
+test('R3: MCP uses only backlog and lines freshly fetched in this worker, failing closed', async t => {
+  for (const mode of ['stale', 'fresh', 'unavailable']) {
+    const f = await fixture(t, { claude: mcpFake });
+    await cached(f, { max_turns_per_run: 2 }, { extraction: 2, lines: 2 });
+    f.state.remote = { points: { ...contract, backlog: mode === 'fresh' ? 1 : 0 }, pending: { lines: mode === 'fresh' ? 1 : 0 } };
+    if (mode === 'unavailable') f.state.fail = true;
+    ok(await f.run('worker.mjs'));
+    const calls = await launches(f);
+    assert.equal(calls.length, mode === 'fresh' ? 2 : 0, mode);
+    assert.equal(f.requests.filter(r => r.url === '/api/client/config').length, 1);
+    if (mode === 'fresh') assert.deepEqual(calls.map(c => c.args[c.args.indexOf('--allowedTools') + 1]), [POINT_TOOLS[0], LINE_TOOLS[0]]);
+  }
+});
+
+const waitFor = async path => {
+  for (let i = 0; i < 250; i++) {
+    if (await stat(path).catch(() => null)) return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.fail('worker did not reach synchronization point');
+};
+test('R4: turns arriving during processing drain within the same worker budget', async t => {
+  const f = await seed(t);
+  const delayed = fake.replace(`process.stdout.write(${JSON.stringify(JSON.stringify(result))});`,
+    `fs.writeFileSync(process.env.HOME + '/processing', ''); setTimeout(() => process.stdout.write(${JSON.stringify(JSON.stringify(result))}), 250);`);
+  await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\n${delayed}`, { mode: 0o700 });
+  const running = f.run('worker.mjs');
+  await waitFor(join(f.home, 'processing'));
+  await f.hook('UserPromptSubmit', { prompt_id: 'arrived', prompt: '処理中の入力' });
+  await f.hook('Stop', { prompt_id: 'arrived', last_assistant_message: '処理中の回答' });
+  ok(await running);
+  assert.equal((await launches(f)).length, 2); assert.equal((await f.names('turns')).length, 0);
+});
+test('R4: after unlocking, one bounded restart catches the last arrival', async t => {
+  const f = await seed(t); await cached(f, { max_turns_per_run: 3 });
+  const name = (await f.names('turns'))[0], turn = await f.read('turns/' + name);
+  const shim = join(f.home, 'unlock-arrival.mjs');
+  await writeFile(shim, `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
+const rename = fs.promises.rename;
+fs.promises.rename = async (path, target) => {
+  const result = await rename(path, target);
+  if (path === process.env.HOME + '/.hmp/worker.lock') fs.writeFileSync(process.env.HOME + '/.hmp/turns/${name}', ${JSON.stringify(JSON.stringify(turn))});
+  return result;
+}; syncBuiltinESMExports();`);
+  f.env.NODE_OPTIONS += ' --import=' + shim;
+  ok(await f.run('worker.mjs'));
+  assert.equal((await launches(f)).length, 2);
+  assert.equal((await f.read('points-usage.json')).turns, 2);
+  assert.equal((await f.names('turns')).length, 1);
+});
+
+test('R5: reclaim never deletes a replacement lock and each turn verifies ownership', async t => {
+  const f = await seed(t);
+  await f.write('worker.lock', { pid: 999999999, started_at: new Date(0).toISOString() });
+  const shim = join(f.home, 'replace-lock.mjs');
+  await writeFile(shim, `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
+let replaced = false;
+for (const key of ['rename', 'unlink']) {
+  const original = fs.promises[key];
+  fs.promises[key] = async (path, ...args) => {
+    if (!replaced && path === process.env.HOME + '/.hmp/worker.lock') {
+      replaced = true; fs.writeFileSync(path, ${JSON.stringify(JSON.stringify({ pid: process.pid, token: 'replacement' }))});
+    }
+    return original(path, ...args);
+  };
+} syncBuiltinESMExports();`);
+  f.env.NODE_OPTIONS += ' --import=' + shim;
+  ok(await f.run('worker.mjs'));
+  assert.equal((await f.read('worker.lock')).token, 'replacement');
+  assert.equal((await launches(f)).length, 0);
+
+  const g = await seed(t); await g.write('worker.lock', { pid: process.pid });
+  await g.hook('UserPromptSubmit', { prompt_id: 'second' }); await g.hook('Stop', { prompt_id: 'second' });
+  await rm(join(g.home, '.hmp/worker.lock'));
+  const steal = `fs.writeFileSync(process.env.HOME + '/.hmp/worker.lock', ${JSON.stringify(JSON.stringify({ pid: process.pid, token: 'replacement' }))});`;
+  await writeFile(join(g.bin, 'claude'), `#!${process.execPath}\n${fake.replace("let input = '';", steal + "let input = '';")}`, { mode: 0o700 });
+  ok(await g.run('worker.mjs'));
+  assert.equal((await launches(g)).length, 1);
+  assert.equal((await g.read('worker.lock')).token, 'replacement');
+  assert.ok((await g.names('turns')).length >= 1);
+});
+
+test('R6: a fresh empty MCP claim disables that stage for the rest of the worker', async t => {
+  const empty = mcpFake.replace(/process.stdout.write\(JSON.stringify\(\{ type: 'assistant'.*\n/, '');
+  const f = await fixture(t, { claude: empty, remote: { points: { ...contract, backlog: 9 }, pending: { lines: 9 } } });
+  await cached(f, {}, { extraction: 99, lines: 99 });
+  ok(await f.run('worker.mjs'));
+  assert.deepEqual((await launches(f)).map(c => c.args[c.args.indexOf('--allowedTools') + 1]), [POINT_TOOLS[0], LINE_TOOLS[0]]);
+});
+test('R7: pause or offrecord during Claude prevents submission and another launch', async t => {
+  for (const mode of ['pause', 'offrecord']) {
+    const f = await seed(t); await f.write('worker.lock', { pid: process.pid });
+    await f.hook('UserPromptSubmit', { prompt_id: 'next' }); await f.hook('Stop', { prompt_id: 'next' });
+    await rm(join(f.home, '.hmp/worker.lock'));
+    const target = mode === 'pause' ? 'pause' : 'offrecord/synthetic-session';
+    const body = mode === 'pause' ? { until: new Date(Date.now() + 60000).toISOString() } : {};
+    const stop = `fs.mkdirSync(process.env.HOME + '/.hmp/offrecord', { recursive: true }); fs.writeFileSync(process.env.HOME + '/.hmp/${target}', ${JSON.stringify(JSON.stringify(body))});`;
+    await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\n${fake.replace("let input = '';", stop + "let input = '';")}`, { mode: 0o700 });
+    ok(await f.run('worker.mjs'));
+    assert.equal(f.requests.filter(r => r.url === '/api/client/points').length, 0, mode);
+    assert.equal((await launches(f)).length, 1, mode);
+    assert.equal((await f.names('turns')).length, mode === 'pause' ? 2 : 0, mode);
+  }
+});
+
+test('R8: failed turns back off without blocking later turns and expire after seven days', async t => {
+  const f = await seed(t); await f.write('worker.lock', { pid: process.pid });
+  await f.hook('UserPromptSubmit', { prompt_id: 'later', prompt: '後続の入力' }); await f.hook('Stop', { prompt_id: 'later' });
+  await rm(join(f.home, '.hmp/worker.lock'));
+  const failFirst = `if (!fs.existsSync(process.env.HOME + '/failed-once')) { fs.writeFileSync(process.env.HOME + '/failed-once', ''); process.exit(1); }`;
+  await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\n${fake.replace("let input = '';", failFirst + "let input = '';")}`, { mode: 0o700 });
+  ok(await f.run('worker.mjs'));
+  assert.equal((await launches(f)).length, 2); assert.equal((await f.names('turns')).length, 1);
+  const name = (await f.names('turns'))[0], retry = await f.read('turn-retries/' + name);
+  assert.deepEqual(Object.keys(retry).sort(), ['attempts', 'code', 'next_retry_at']);
+  assert.equal(retry.attempts, 1); assert.equal(retry.code, 'claude_failed');
+  assert.ok(retry.next_retry_at > Date.now() + 290000);
+  ok(await f.run('worker.mjs')); assert.equal((await launches(f)).length, 2);
+  await f.write('turn-retries/' + name, { ...retry, next_retry_at: 0 });
+  ok(await f.run('worker.mjs')); assert.equal((await launches(f)).length, 3); assert.equal((await f.names('turns')).length, 0);
+  assert.equal((await f.names('turn-retries')).length, 0);
+  const old = await seed(t), oldName = (await old.names('turns'))[0], turn = await old.read('turns/' + oldName);
+  await old.write('turns/' + oldName, { ...turn, turn_ended_at: Date.now() - 8 * 86400000 });
+  ok(await old.run('worker.mjs'));
+  assert.equal((await launches(old)).length, 0); assert.equal((await old.names('turns')).length, 0);
+  assert.equal(await lastCode(old), 'turn_expired');
+});
+
+test('R4/R6: MCP refetches waiting stages after processing a claim', async t => {
+  const delayed = mcpFake.replace('process.stdout.write(', "fs.writeFileSync(process.env.HOME + '/claiming', ''); setTimeout(() => { process.stdout.write(") + '\n}, 250);';
+  const f = await fixture(t, { claude: delayed, remote: { points: { ...contract, backlog: 1 }, pending: { lines: 0 } } });
+  await cached(f, { max_turns_per_run: 2 });
+  const running = f.run('worker.mjs'); await waitFor(join(f.home, 'claiming'));
+  f.state.remote = { points: { ...contract, backlog: 0 }, pending: { lines: 1 } };
+  ok(await running);
+  assert.deepEqual((await launches(f)).map(c => c.args[c.args.indexOf('--allowedTools') + 1]), [POINT_TOOLS[0], LINE_TOOLS[0]]);
+  assert.ok(f.requests.filter(r => r.url === '/api/client/config').length >= 2);
+});
+
+test('R8: retry intervals increase to one day without retaining body text', async t => {
+  const f = await seed(t);
+  await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\n${fake.replace("let input = '';", "process.exit(1); let input = '';")}`, { mode: 0o700 });
+  for (const [i, minutes] of [5, 30, 120, 360, 1440, 1440].entries()) {
+    await retryNow(f);
+    const start = Date.now(); ok(await f.run('worker.mjs'));
+    const retry = await f.read('turn-retries/' + (await f.names('turns'))[0]);
+    assert.equal(retry.attempts, i + 1);
+    assert.ok(retry.next_retry_at >= start + minutes * 60000);
+    assert.ok(retry.next_retry_at <= Date.now() + minutes * 60000);
+    assert.deepEqual(Object.keys(retry).sort(), ['attempts', 'code', 'next_retry_at']);
+  }
+  assert.equal((await launches(f)).length, 6);
+});
+test('R5: simultaneous stale-lock collectors leave one worker and one daily reservation', async t => {
+  const f = await seed(t); await cached(f, { max_turns_per_run: 1 });
+  await f.write('worker.lock', { pid: 999999999, started_at: new Date(0).toISOString() });
+  const delayed = fake.replace(`process.stdout.write(${JSON.stringify(JSON.stringify(result))});`, `setTimeout(() => process.stdout.write(${JSON.stringify(JSON.stringify(result))}), 250);`);
+  await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\n${delayed}`, { mode: 0o700 });
+  for (const response of await Promise.all(Array.from({ length: 6 }, () => f.run('worker.mjs')))) ok(response);
+  assert.equal((await launches(f)).length, 1); assert.equal((await f.read('points-usage.json')).turns, 1);
+  assert.equal((await f.names('turns')).length, 0);
+});
+test('R1: Codex turn_id pairs prompts and Stops despite async delivery', async t => {
+  const f = await fixture(t, { noToken: true }); await cached(f); await f.write('worker.lock', { pid: process.pid });
+  const hook = (event, turn_id, text) => f.run('hook.mjs', [event, 'codex'], { cwd: f.project, session_id: 'synthetic-session', turn_id,
+    ...(event === 'Stop' ? { last_assistant_message: text } : { prompt: text }) });
+  await hook('UserPromptSubmit', 'one', 'P1'); await hook('UserPromptSubmit', 'two', 'P2');
+  await hook('Stop', 'two', 'R2'); await hook('Stop', 'one', 'R1');
+  const turns = await Promise.all((await f.names('turns')).map(n => f.read('turns/' + n)));
+  assert.deepEqual(turns.map(v => [v.prompt?.text, v.response?.text]).sort(), [['P1', 'R1'], ['P2', 'R2']]);
+});
+test('R7: worker ignores a later cwd ignore marker because Hook already checked capture scope', async t => {
+  const f = await seed(t); await writeFile(join(f.project, '.hmp-ignore'), '');
+  ok(await f.run('worker.mjs'));
+  assert.equal((await launches(f)).length, 1); assert.equal((await f.names('turns')).length, 0);
+});
+
+test('R7: offrecord during a failing Claude also discards the session queue', async t => {
+  const f = await seed(t);
+  await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\nconst fs = require('node:fs');
+fs.mkdirSync(process.env.HOME + '/.hmp/offrecord', { recursive: true });
+fs.writeFileSync(process.env.HOME + '/.hmp/offrecord/synthetic-session', '{}'); process.exit(1);`, { mode: 0o700 });
+  ok(await f.run('worker.mjs'));
+  assert.equal((await f.names('turns')).length, 0); assert.equal((await f.names('turn-retries')).length, 0);
+  assert.equal(f.requests.filter(r => r.url === '/api/client/points').length, 0);
+});
+
+test('R4: refreshed MCP backlog continues up to the shared run maximum', async t => {
+  const f = await fixture(t, { claude: mcpFake, remote: { points: { ...contract, backlog: 20 } } });
+  await cached(f);
+  ok(await f.run('worker.mjs'));
+  assert.equal((await launches(f)).length, 10); assert.equal((await f.read('points-usage.json')).turns, 10);
+  assert.ok(f.requests.filter(r => r.url === '/api/client/config').length > 1);
 });

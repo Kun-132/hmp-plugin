@@ -35,7 +35,7 @@ export function serverSummary(value) {
     notice: Boolean(value?.notice),
     ...(typeof value?.instance_origin === 'string' ? { instance_origin: value.instance_origin } : {}),
     ...(value?.points && typeof value.points === 'object' ? { points: {
-      contract_version: value.points.contract_version, instructions: value.points.instructions,
+      backlog: count(value.points.backlog), contract_version: value.points.contract_version, instructions: value.points.instructions,
       output_schema: value.points.output_schema,
       automated_prefixes: Array.isArray(value.points.automated_prefixes)
         ? value.points.automated_prefixes.filter(p => typeof p === 'string' && p.trim()).map(p => p.trim()) : [],

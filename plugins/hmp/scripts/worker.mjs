@@ -1,3 +1,4 @@
+import { acquireFileLock, readLock, reclaimLock, ownsFileLock, releaseFileLock } from './locks.mjs';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { lstatSync, realpathSync } from 'node:fs';
@@ -7,9 +8,9 @@ import { join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
 import { loadConfig, validateMcp } from './config.mjs';
-import { pathFor, privateDir, readJSON, writeJSON, remove } from './state.mjs';
+import { pathFor, readJSON, writeJSON, paused } from './state.mjs';
 import { serverSummary } from './client.mjs';
-import { cachedSummary, recordFailure } from './turns.mjs';
+import { cachedSummary, readyTurns, recordFailure } from './turns.mjs';
 
 export const EXTRACTION_TOOLS = Object.freeze(['mcp__hmp__claim_extraction', 'mcp__hmp__submit_extraction',
   'mcp__hmp__submit_purpose_links']);
@@ -36,35 +37,27 @@ export function effectiveLimits(limits = {}) {
   return Object.fromEntries(Object.entries(MAXIMUM).map(([key, max]) => [key,
     key in limits ? (Number.isFinite(limits[key]) && limits[key] >= 0 ? Math.min(max, Math.floor(limits[key])) : 0) : max]));
 }
+let workerLease;
 export async function workerLocked(config) {
   const file = pathFor('worker.lock');
-  const owner = await readJSON(file).catch(e => { if (e.code === 'ENOENT') return null; throw e; });
+  const owner = await readLock(file);
   if (!owner) return false;
   if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) return true;
   try { process.kill(owner.pid, 0); return true; }
   catch (e) { if (e.code !== 'ESRCH') return true; }
-  const current = await readJSON(file).catch(e => { if (e.code === 'ENOENT') return null; throw e; });
-  if (!current) return false;
-  if (current.pid !== owner.pid || current.started_at !== owner.started_at) return true;
-  await remove(file);
+  if (!await reclaimLock(file, owner)) return true;
   await recordFailure(config ?? await loadConfig(), 'stale_lock_cleared');
   return false;
 }
 export async function acquireLock() {
-  await privateDir();
-  try {
-    await writeJSON(pathFor('worker.lock'), { pid: process.pid, started_at: new Date().toISOString() }, true);
-    return true;
-  } catch (e) { if (e.code !== 'EEXIST') throw e; }
   if (await workerLocked()) return false;
-  try {
-    await writeJSON(pathFor('worker.lock'), { pid: process.pid, started_at: new Date().toISOString() }, true);
-    return true;
-  } catch (e) { if (e.code === 'EEXIST') return false; throw e; }
+  workerLease = await acquireFileLock(pathFor('worker.lock'), { stale: () => false });
+  return Boolean(workerLease);
 }
+export const ownsWorkerLock = () => ownsFileLock(workerLease);
 export async function releaseLock() {
-  const owner = await readJSON(pathFor('worker.lock'));
-  if (owner.pid === process.pid) await remove(pathFor('worker.lock'));
+  await releaseFileLock(workerLease);
+  workerLease = null;
 }
 export function claudeEnv() {
   const env = {};
@@ -209,18 +202,18 @@ export async function verifyWorker(mode = 'legacy') {
     return { ready: true, lines: result.lines, server: 'hmp', url: config.instance_url + '/mcp' };
   } finally { await rmdir(directory).catch(() => {}); }
 }
-export async function runWorker() {
+export async function runWorker({ remaining = Infinity, restarted = false } = {}) {
   if (!await acquireLock()) return;
-  let directory;
+  let directory, pointsOutcome, pointsConfig;
   try {
     const config = await loadConfig();
     const summary = serverSummary(await cachedSummary(config));
     const limits = effectiveLimits(summary.limits);
     if (summary.paused) return;
-    const pause = await readJSON(pathFor('pause')).catch(e => { if (e.code === 'ENOENT') return null; throw e; });
-    if (pause && (!Number.isFinite(Date.parse(pause.until)) || Date.parse(pause.until) > Date.now())) return;
+    if (await paused()) return;
     if (summary.points) {
-      await (await import('./points-worker.mjs')).runPointsWorker(config, summary);
+      pointsConfig = config;
+      pointsOutcome = await (await import('./points-worker.mjs')).runPointsWorker(config, summary, { remaining });
       return;
     }
     if (!limits.max_runs_per_day || !limits.max_items_per_run || !limits.max_minutes) return;
@@ -246,6 +239,7 @@ export async function runWorker() {
     let launches = 0, extractions = 0, extractionEmpty = false;
     while (queue.length && launches < limits.max_items_per_run) {
       if (Date.now() >= end) break;
+      if (await paused() || !await ownsWorkerLock()) break;
       const claim = queue.shift();
       launches++;
       if (claim === EXTRACTION_TOOLS[0]) extractions++;
@@ -268,6 +262,8 @@ export async function runWorker() {
     // Only remove an empty directory we created. Never recurse through model output.
     if (directory) await rmdir(directory).catch(() => {});
     await releaseLock();
+    if (!restarted && pointsOutcome?.remaining > 0 && (await readyTurns(pointsConfig)).length)
+      await runWorker({ remaining: pointsOutcome.remaining, restarted: true });
   }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

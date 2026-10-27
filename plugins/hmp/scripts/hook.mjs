@@ -46,7 +46,7 @@ async function main() {
     if (!entry && !(event === 'Stop' && summary.points)) return;
     if (entry) await enqueue(entry, config);
     if (summary.points) await recordTurn(config, input.session_id, entry, {
-      prompt: event === 'UserPromptSubmit',
+      prompt: event === 'UserPromptSubmit', promptId: codex ? input.turn_id : input.prompt_id,
       complete: event === 'Stop' && (codex || input.background_tasks === undefined || Array.isArray(input.background_tasks) && !input.background_tasks.length),
     });
     try {
