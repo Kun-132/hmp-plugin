@@ -38,8 +38,9 @@ async function main() {
   }
   if (await suppressed(input.cwd)) return;
   if (event !== 'SessionStart') {
+    if (event === 'UserPromptSubmit' && automated(input.prompt)) return;
     const config = await loadConfig();
-    const summary = await cachedSummary(config);
+    const summary = await cachedSummary(config, { deadline });
     if (event === 'UserPromptSubmit' && automated(input.prompt, summary.points)) {
       return;
     }

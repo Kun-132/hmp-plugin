@@ -75,7 +75,12 @@ export async function runPointsClaude(directory, contract, sentences, timeoutMs,
         if (result.type !== 'result' || result.subtype !== 'success' || result.is_error !== false ||
             !validateOutput(result.structured_output, contract.output_schema)) throw Error();
         const usage = { duration_ms: Date.now() - started };
-        for (const key of ['input_tokens', 'output_tokens']) if (Number.isSafeInteger(result.usage?.[key]) && result.usage[key] >= 0) usage[key] = result.usage[key];
+        for (const key of ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens'])
+          if (Number.isSafeInteger(result.usage?.[key]) && result.usage[key] >= 0) usage[key] = result.usage[key];
+        if (usage.input_tokens !== undefined) {
+          const total = usage.input_tokens + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+          if (Number.isSafeInteger(total)) usage.input_total_tokens = total;
+        }
         resolve({ points: result.structured_output.points, usage });
       } catch { resolve({ code: 'output_invalid' }); }
     });
@@ -163,7 +168,8 @@ export async function runPointsWorker(config, summary, { remaining = Infinity } 
         try {
           const receipt = await request(config, token, '/api/client/points', { body: {
             client_version: CLIENT_VERSION, device: config.device, turn: ids, sentences, points: result.points, model: 'sonnet',
-            usage: { ...result.usage, turn_ended_at: turn.turn_ended_at },
+            usage: { input_tokens: result.usage.input_total_tokens, output_tokens: result.usage.output_tokens,
+              duration_ms: result.usage.duration_ms, turn_ended_at: turn.turn_ended_at },
           }, deadline: Date.now() + 8000, timeout: 8000 });
           if (['accepted', 'already_done'].includes(receipt.status)) {
             const accepted_at = Date.now();

@@ -5,8 +5,17 @@ function numericRow(value, required, optional = []) {
   if (!value || !required.every(key => count(value[key]))) return null;
   return Object.fromEntries([...required, ...optional].filter(key => count(value[key])).map(key => [key, value[key]]));
 }
-const pointRow = value => numericRow(value,
-  ['accepted_at', 'turn_to_accepted_ms', 'duration_ms', 'written', 'dropped'], ['input_tokens', 'output_tokens']);
+const tokenFields = ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'input_total_tokens', 'output_tokens'];
+function reasonCounts(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter(([code, n]) => /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(code)
+    && code.length <= 64 && count(n)));
+}
+function pointRow(value) {
+  const row = numericRow(value, ['accepted_at', 'turn_to_accepted_ms', 'duration_ms', 'written', 'dropped'], tokenFields);
+  if (row && value.dropped_by_reason) row.dropped_by_reason = reasonCounts(value.dropped_by_reason);
+  return row;
+}
 const backlogRow = value => numericRow(value, ['at', 'extraction', 'backlog']);
 async function histories(file, clean, limit) {
   const value = await readJSON(pathFor(file)).catch(e => { if (e.code === 'ENOENT') return {}; throw e; });
@@ -20,9 +29,10 @@ async function append(file, origin, row, clean, limit) {
 }
 export async function recordPointsStats(config, { accepted_at, turn_ended_at, usage, written, dropped }) {
   const row = pointRow({ accepted_at, turn_to_accepted_ms: Math.max(0, accepted_at - turn_ended_at),
-    duration_ms: usage?.duration_ms, input_tokens: usage?.input_tokens, output_tokens: usage?.output_tokens,
+    duration_ms: usage?.duration_ms, ...Object.fromEntries(tokenFields.map(key => [key, usage?.[key]])),
     written: count(written) ? written : 0,
-    dropped: Object.values(dropped ?? {}).filter(count).reduce((sum, n) => sum + n, 0) });
+    dropped: Object.values(dropped ?? {}).filter(count).reduce((sum, n) => sum + n, 0),
+    dropped_by_reason: reasonCounts(dropped) });
   if (row) await append('points-stats.json', config.instance_url, row, pointRow, 500);
 }
 function median(values) {
@@ -35,8 +45,13 @@ function summarize(rows) {
   const tokens = key => median(rows.filter(row => count(row[key])).map(row => row[key]));
   return { count: rows.length,
     turn_to_accepted_seconds: { median: median(latency), p90: latency.length ? latency[Math.ceil(latency.length * 0.9) - 1] : null },
-    input_tokens_median: tokens('input_tokens'), output_tokens_median: tokens('output_tokens'),
-    written_median: median(rows.map(row => row.written)) };
+    input_tokens_median: tokens('input_tokens'), input_total_tokens_median: tokens('input_total_tokens'),
+    output_tokens_median: tokens('output_tokens'), written_median: median(rows.map(row => row.written)),
+    dropped: rows.reduce((sum, row) => sum + row.dropped, 0),
+    dropped_by_reason: reasonCounts(rows.reduce((totals, row) => {
+      for (const [code, n] of Object.entries(row.dropped_by_reason ?? {})) totals[code] = (totals[code] ?? 0) + n;
+      return totals;
+    }, Object.create(null))) };
 }
 export async function pointsStats(config, now = Date.now()) {
   const rows = (await histories('points-stats.json', pointRow, 500))[config.instance_url] ?? [];
