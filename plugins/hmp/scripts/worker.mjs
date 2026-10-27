@@ -38,14 +38,16 @@ export function effectiveLimits(limits = {}) {
     key in limits ? (Number.isFinite(limits[key]) && limits[key] >= 0 ? Math.min(max, Math.floor(limits[key])) : 0) : max]));
 }
 let workerLease;
+const deadOwner = owner => {
+  if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) return false;
+  try { process.kill(owner.pid, 0); return false; }
+  catch (e) { return e.code === 'ESRCH'; }
+};
 export async function workerLocked(config) {
   const file = pathFor('worker.lock');
   const owner = await readLock(file);
   if (!owner) return false;
-  if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) return true;
-  try { process.kill(owner.pid, 0); return true; }
-  catch (e) { if (e.code !== 'ESRCH') return true; }
-  if (!await reclaimLock(file, owner)) return true;
+  if (!deadOwner(owner) || !await reclaimLock(file, deadOwner)) return true;
   await recordFailure(config ?? await loadConfig(), 'stale_lock_cleared');
   return false;
 }

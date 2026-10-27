@@ -71,7 +71,7 @@ test('automated notifications preserve the human prompt through background work'
   assert.equal(await readFile(join(f.home, '.hmp/sessions', name), 'utf8'), before);
   await f.hook('Stop', { prompt_id: undefined, last_assistant_message: '2回目の答え', background_tasks: [] });
   const turn = await f.read('turns/' + (await f.names('turns'))[0]);
-  assert.equal(turn.previous.text, '1回目の答え');
+  assert.equal(turn.previous, undefined);
   assert.equal(turn.prompt.text, '本人の言葉'); assert.equal(turn.response.text, '2回目の答え');
   const legacy = await fixture(t);
   await legacy.hook('UserPromptSubmit', { prompt: '[SYSTEM NOTIFICATION 合成' });
@@ -79,11 +79,13 @@ test('automated notifications preserve the human prompt through background work'
 });
 test('Stop queues only with absent or empty background tasks, stores redacted previous/prompt/response privately', async t => {
   const f = await fixture(t, { noToken: true }); await cached(f); await f.write('worker.lock', { pid: process.pid });
-  await f.hook('Stop', { prompt_id: 'previous', last_assistant_message: '直前の答え。', background_tasks: ['running'] });
-  assert.equal((await f.names('turns')).length, 0);
+  await f.hook('Stop', { prompt_id: 'previous', last_assistant_message: '直前の答え。', background_tasks: [] });
+  assert.equal((await f.names('turns')).length, 1);
+  const previousName = (await f.names('turns'))[0];
   await f.hook('UserPromptSubmit', { prompt_id: 'current', prompt: 'それで進める。 api_key="SYNTHETIC_SECRET"' });
   await f.hook('Stop', { prompt_id: 'current', last_assistant_message: '今回の答え。', background_tasks: [] });
-  const name = (await f.names('turns'))[0], turn = await f.read('turns/' + name);
+  const names = await f.names('turns');
+  const name = names.find(n => n !== previousName), turn = await f.read('turns/' + name);
   assert.equal(turn.previous.text, '直前の答え。'); assert.ok(turn.prompt.text.includes('<SECRET>')); assert.equal(turn.response.text, '今回の答え。');
   assert.equal(typeof turn.turn_ended_at, 'number');
   for (const dir of ['turns', 'sessions']) {
@@ -94,7 +96,7 @@ test('Stop queues only with absent or empty background tasks, stores redacted pr
     }
   }
   await f.hook('Stop', { prompt_id: 'current', last_assistant_message: '今回の答え。', background_tasks: [] });
-  assert.deepEqual(await f.names('turns'), [name]);
+  assert.deepEqual(await f.names('turns'), names);
 });
 test('sentence boundaries match HMP including decimal dots, whitespace, Unicode and 900 UTF-16 units', () => {
   const text = ' \n一。二！？!?\n3.14 example.com. next.\n' + 'a'.repeat(899) + '🙂終わり';
@@ -109,8 +111,8 @@ test('worker flushes events then submits structured points with capture IDs, sen
   await f.setCredentials({ 'synthetic-device@127.0.0.1': 'synthetic' }); f.env.HMP_CLIENT_TOKEN = 'synthetic';
   f.env.ANTHROPIC_API_KEY = 'SYNTHETIC_FORBIDDEN_KEY';
   ok(await f.run('worker.mjs'));
-  assert.deepEqual(f.requests.map(r => r.url), ['/api/client/events', '/api/client/points', '/api/client/config']);
-  const events = f.requests[0].body.events, body = f.requests[1].body;
+  assert.deepEqual(f.requests.map(r => r.url), ['/api/client/config', '/api/client/events', '/api/client/points', '/api/client/config']);
+  const events = f.requests[1].body.events, body = f.requests[2].body;
   assert.deepEqual(body.turn, Object.fromEntries(events.map(e => [e.kind, 'cap_' + e.client_event_id.slice(4)])));
   assert.deepEqual(body.sentences, [{ n: 1, part: 'prompt', text: '合成の判断。' }, { n: 2, part: 'prompt', text: '次へ!' }, { n: 3, part: 'response', text: '合成の回答。' }]);
   assert.deepEqual(body.points, [point]); assert.equal(body.client_version, '0.2.0'); assert.equal(body.model, 'sonnet');
@@ -371,7 +373,7 @@ test('R3: MCP uses only backlog and lines freshly fetched in this worker, failin
     ok(await f.run('worker.mjs'));
     const calls = await launches(f);
     assert.equal(calls.length, mode === 'fresh' ? 2 : 0, mode);
-    assert.equal(f.requests.filter(r => r.url === '/api/client/config').length, 1);
+    assert.equal(f.requests.filter(r => r.url === '/api/client/config').length, mode === 'unavailable' ? 1 : 2);
     if (mode === 'fresh') assert.deepEqual(calls.map(c => c.args[c.args.indexOf('--allowedTools') + 1]), [POINT_TOOLS[0], LINE_TOOLS[0]]);
   }
 });
@@ -386,12 +388,13 @@ const waitFor = async path => {
 test('R4: turns arriving during processing drain within the same worker budget', async t => {
   const f = await seed(t);
   const delayed = fake.replace(`process.stdout.write(${JSON.stringify(JSON.stringify(result))});`,
-    `fs.writeFileSync(process.env.HOME + '/processing', ''); setTimeout(() => process.stdout.write(${JSON.stringify(JSON.stringify(result))}), 250);`);
+    `fs.writeFileSync(process.env.HOME + '/processing', ''); const gate = setInterval(() => { if (fs.existsSync(process.env.HOME + '/processing-release')) { clearInterval(gate); process.stdout.write(${JSON.stringify(JSON.stringify(result))}); } }, 10);`);
   await writeFile(join(f.bin, 'claude'), `#!${process.execPath}\n${delayed}`, { mode: 0o700 });
   const running = f.run('worker.mjs');
   await waitFor(join(f.home, 'processing'));
   await f.hook('UserPromptSubmit', { prompt_id: 'arrived', prompt: '処理中の入力' });
   await f.hook('Stop', { prompt_id: 'arrived', last_assistant_message: '処理中の回答' });
+  await writeFile(join(f.home, 'processing-release'), '');
   ok(await running);
   assert.equal((await launches(f)).length, 2); assert.equal((await f.names('turns')).length, 0);
 });
@@ -400,9 +403,9 @@ test('R4: after unlocking, one bounded restart catches the last arrival', async 
   const name = (await f.names('turns'))[0], turn = await f.read('turns/' + name);
   const shim = join(f.home, 'unlock-arrival.mjs');
   await writeFile(shim, `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
-const rename = fs.promises.rename;
-fs.promises.rename = async (path, target) => {
-  const result = await rename(path, target);
+const unlink = fs.promises.unlink;
+fs.promises.unlink = async path => {
+  const result = await unlink(path);
   if (path === process.env.HOME + '/.hmp/worker.lock') fs.writeFileSync(process.env.HOME + '/.hmp/turns/${name}', ${JSON.stringify(JSON.stringify(turn))});
   return result;
 }; syncBuiltinESMExports();`);
@@ -419,11 +422,11 @@ test('R5: reclaim never deletes a replacement lock and each turn verifies owners
   const shim = join(f.home, 'replace-lock.mjs');
   await writeFile(shim, `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
 let replaced = false;
-for (const key of ['rename', 'unlink']) {
+for (const key of ['open']) {
   const original = fs.promises[key];
   fs.promises[key] = async (path, ...args) => {
-    if (!replaced && path === process.env.HOME + '/.hmp/worker.lock') {
-      replaced = true; fs.writeFileSync(path, ${JSON.stringify(JSON.stringify({ pid: process.pid, token: 'replacement' }))});
+    if (!replaced && path === process.env.HOME + '/.hmp/worker.lock.reclaim') {
+      replaced = true; fs.writeFileSync(process.env.HOME + '/.hmp/worker.lock', ${JSON.stringify(JSON.stringify({ pid: process.pid, token: 'replacement' }))});
     }
     return original(path, ...args);
   };
@@ -491,11 +494,12 @@ test('R8: failed turns back off without blocking later turns and expire after se
 });
 
 test('R4/R6: MCP refetches waiting stages after processing a claim', async t => {
-  const delayed = mcpFake.replace('process.stdout.write(', "fs.writeFileSync(process.env.HOME + '/claiming', ''); setTimeout(() => { process.stdout.write(") + '\n}, 250);';
+  const delayed = "const fs = require('node:fs'); fs.writeFileSync(process.env.HOME + '/claiming', ''); const gate = setInterval(() => { if (!fs.existsSync(process.env.HOME + '/claim-release')) return; clearInterval(gate);\n" + mcpFake.replace("const fs = require('node:fs');", '') + '\n}, 10);';
   const f = await fixture(t, { claude: delayed, remote: { points: { ...contract, backlog: 1 }, pending: { lines: 0 } } });
   await cached(f, { max_turns_per_run: 2 });
   const running = f.run('worker.mjs'); await waitFor(join(f.home, 'claiming'));
   f.state.remote = { points: { ...contract, backlog: 0 }, pending: { lines: 1 } };
+  await writeFile(join(f.home, 'claim-release'), '');
   ok(await running);
   assert.deepEqual((await launches(f)).map(c => c.args[c.args.indexOf('--allowedTools') + 1]), [POINT_TOOLS[0], LINE_TOOLS[0]]);
   assert.ok(f.requests.filter(r => r.url === '/api/client/config').length >= 2);
@@ -555,4 +559,74 @@ test('R4: refreshed MCP backlog continues up to the shared run maximum', async t
   ok(await f.run('worker.mjs'));
   assert.equal((await launches(f)).length, 10); assert.equal((await f.read('points-usage.json')).turns, 10);
   assert.ok(f.requests.filter(r => r.url === '/api/client/config').length > 1);
+});
+
+test('review: intermediate Stop never becomes its own previous answer', async t => {
+  const f = await fixture(t, { noToken: true }); await cached(f); await f.write('worker.lock', { pid: process.pid });
+  await f.hook('UserPromptSubmit', { prompt_id: 'p', prompt: 'P' });
+  await f.hook('Stop', { prompt_id: 'p', last_assistant_message: 'R1', background_tasks: ['running'] });
+  await f.hook('Stop', { prompt_id: 'p', last_assistant_message: 'R1' });
+  const turn = await f.read('turns/' + (await f.names('turns'))[0]);
+  assert.equal(turn.previous, undefined);
+  assert.equal(turn.response.text, 'R1');
+});
+test('review: previous uses closed answers before the prompt, even with late old Stops', async t => {
+  const f = await fixture(t, { noToken: true }); await cached(f); await f.write('worker.lock', { pid: process.pid });
+  const clock = join(f.home, 'clock.mjs');
+  await writeFile(clock, 'Date.now = () => Number(process.env.TEST_NOW);');
+  f.env.NODE_OPTIONS += ' --import=' + clock;
+  let now = 1700000000000;
+  const send = async (event, input) => { f.env.TEST_NOW = String(now += 10); ok(await f.hook(event, input)); };
+  await send('Stop', { prompt_id: 'zero', last_assistant_message: 'R0' });
+  await send('UserPromptSubmit', { prompt_id: 'p1', prompt: 'P1' });
+  await send('UserPromptSubmit', { prompt_id: 'p2', prompt: 'P2' });
+  await send('Stop', { prompt_id: 'p2', last_assistant_message: 'R2' });
+  await send('Stop', { prompt_id: 'p1', last_assistant_message: 'R1' });
+  await send('UserPromptSubmit', { prompt_id: 'p3', prompt: 'P3' });
+  await send('Stop', { prompt_id: 'p3', last_assistant_message: 'R3' });
+  const turns = await Promise.all((await f.names('turns')).map(n => f.read('turns/' + n)));
+  assert.equal(turns.find(v => v.prompt?.text === 'P1').previous.text, 'R0');
+  assert.equal(turns.find(v => v.prompt?.text === 'P2').previous.text, 'R0');
+  assert.equal(turns.find(v => v.prompt?.text === 'P3').previous.text, 'R2');
+  await send('UserPromptSubmit', { prompt_id: 'p4', prompt: 'P4' });
+  await send('Stop', { prompt_id: 'p4', last_assistant_message: 'R4' });
+  const state = await f.read('sessions/' + (await f.names('sessions'))[0]);
+  assert.equal(state.closed_responses.length, 4);
+  assert.ok(state.closed_responses.every(r => Number.isFinite(r.recorded_at)));
+});
+for (const mode of ['paused', 'unavailable']) {
+  test(`review: initial remote config ${mode} preserves queues and prevents all processing`, async t => {
+    const f = await seed(t, { noToken: true });
+    await f.setCredentials({ 'synthetic-device@127.0.0.1': 'synthetic' }); f.env.HMP_CLIENT_TOKEN = 'synthetic';
+    f.state.remote = { paused: mode === 'paused' }; f.state.fail = mode === 'unavailable';
+    ok(await f.run('worker.mjs'));
+    assert.deepEqual(f.requests.map(r => r.url), ['/api/client/config']);
+    assert.equal((await launches(f)).length, 0);
+    assert.equal((await f.names('turns')).length, 1);
+    assert.equal((await f.names('spool')).length, 2);
+    assert.equal((await f.names('turn-retries')).length, 0);
+  });
+}
+test('review: source-paused 503 stops remaining turns without consuming them', async t => {
+  const f = await seed(t); await f.write('worker.lock', { pid: process.pid });
+  await f.hook('UserPromptSubmit', { prompt_id: 'next' }); await f.hook('Stop', { prompt_id: 'next' });
+  await rm(join(f.home, '.hmp/worker.lock'));
+  f.requests.length = 0; f.state.pointsFail = true; f.state.pointsReceipt = { error: 'client_source_paused' };
+  ok(await f.run('worker.mjs'));
+  assert.equal((await launches(f)).length, 1);
+  assert.equal(f.requests.filter(r => r.url === '/api/client/points').length, 1);
+  assert.equal((await f.names('turns')).length, 2);
+  assert.equal((await f.names('turn-retries')).length, 0);
+});
+
+test('review: source-paused event upload ends the run with spool and turns intact', async t => {
+  const f = await seed(t, { noToken: true });
+  await f.setCredentials({ 'synthetic-device@127.0.0.1': 'synthetic' }); f.env.HMP_CLIENT_TOKEN = 'synthetic';
+  f.state.eventsPaused = true;
+  ok(await f.run('worker.mjs'));
+  assert.deepEqual(f.requests.map(r => r.url), ['/api/client/config', '/api/client/events']);
+  assert.equal((await launches(f)).length, 0);
+  assert.equal((await f.names('turns')).length, 1);
+  assert.equal((await f.names('spool')).length, 2);
+  assert.equal((await f.names('turn-retries')).length, 0);
 });

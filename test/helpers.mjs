@@ -25,6 +25,7 @@ export async function fixture(t, { remote = {}, fail = false, noToken = false, c
     if (state.fail) return { status: 503, body: '{}' };
     if (url === '/api/client/forget') return { status: 200, body: JSON.stringify({ forgotten: { captures: 2, facts: 1, blocks: 1 }, retained_notice: 'Synthetic retained notice' }) };
     if (url === '/api/client/config') return { status: 200, body: JSON.stringify(state.remote) };
+    if (url === '/api/client/events' && state.eventsPaused) return { status: 503, body: JSON.stringify({ error: 'client_source_paused' }) };
     if (url === '/api/client/points') return { status: state.pointsFail ? 503 : 200, body: JSON.stringify(state.pointsReceipt) };
     let accepted = 0, duplicates = 0;
     for (const event of JSON.parse(raw).events) {

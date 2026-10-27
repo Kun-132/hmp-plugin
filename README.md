@@ -21,6 +21,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/manage.mjs" codex-hooks remove
 ```
 
 `install` は `~/.codex/hooks.json` の UserPromptSubmit・Stop・SessionStart の既存グループ末尾に各1件だけ追加します。同じ呼び口は重ねず、他ツールの項目・空白・表記を保持します。`status` は `installed: true|false` だけを返します。バックアップを `~/.hmp/backups/`、差分・戻し手順・読み戻し結果を `~/.hmp/changes/` に記録してから変更します。表示された `manage.mjs restore <ID>` でその時点へ復元でき、`codex-hooks remove` は HMP の項目だけを外して後から加えた他ツールの設定を保持します。新規作成した設定ファイルは、他の項目がなければ外す際に削除します。
+`hooks_contain_secret` で止まった場合は、`${CLAUDE_PLUGIN_ROOT}/scripts/codex-hook.mjs` を `~/.hmp/bin/codex-hook.mjs` にコピー（ディレクトリは700、ファイルは600）し、`~/.codex/hooks.json` の UserPromptSubmit・Stop・SessionStart に各 `{"hooks":[{"type":"command","command":"node \"$HOME/.hmp/bin/codex-hook.mjs\" <イベント名>","timeout":5}]}` を手で追加してください。
 
 版をまたぐ呼び口は `~/.hmp/bin/codex-hook.mjs`（ディレクトリ0700・ファイル0600）です。`~/.claude/plugins/installed_plugins.json` の `hmp@hmp-marketplace` だけを参照し、`~/.claude/plugins/cache/hmp-marketplace/` 内の実体の `scripts/hook.mjs` を呼びます。symlink・外部パスは拒否し、未導入なら無出力で exit 0。`remove` 後も呼び口と変更履歴は残ります。
 

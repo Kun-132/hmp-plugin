@@ -26,6 +26,8 @@ export async function recordTurn(config, session, event, { prompt = false, compl
     const state = await readJSON(file).catch(e => { if (e.code === 'ENOENT') return {}; throw e; });
     const prompts = state.prompts ?? (state.prompt ? [state.prompt] : []);
     delete state.prompt;
+    delete state.response;
+    const closed = state.closed_responses ?? [];
     const matchId = typeof promptId === 'string' && promptId ? hash(promptId) : undefined;
     if (prompt) {
       if (event && !prompts.some(p => p.client_event_id === event.client_event_id))
@@ -38,20 +40,25 @@ export async function recordTurn(config, session, event, { prompt = false, compl
       const identity = hash(JSON.stringify([selected?.client_event_id, event?.client_event_id]));
       if (state.completed_turn === identity || !selected && state.completed_response === event?.client_event_id) return;
       if (complete) {
-        const turn = { instance_origin: config.instance_url, session, turn_ended_at: Date.now(),
-          ...(state.response ? { previous: state.response } : {}), ...(selected ? { prompt: part(selected) } : {}),
+        const now = Date.now();
+        const previous = closed.filter(r => r.recorded_at < (selected?.recorded_at ?? now)).at(-1);
+        const turn = { instance_origin: config.instance_url, session, turn_ended_at: now,
+          ...(previous ? { previous: part(previous) } : {}), ...(selected ? { prompt: part(selected) } : {}),
           ...(event ? { response: part(event) } : {}) };
         const queued = pathFor('turns/' + turnName(turn));
         try { await publishJSON(queued, turn); } catch (e) { if (e.code !== 'EEXIST') throw e; }
         if (await isOffrecord(session)) await remove(queued);
         state.completed_turn = identity;
         state.completed_response = event?.client_event_id;
+        if (event) {
+          closed.push({ ...part(event), recorded_at: now, prompt_recorded_at: selected?.recorded_at ?? now });
+          closed.sort((a, b) => a.prompt_recorded_at - b.prompt_recorded_at || a.recorded_at - b.recorded_at);
+        }
         if (index >= 0) prompts.splice(index, 1);
       }
-      if (event) state.response = part(event);
     }
     const now = Date.now();
-    await writeJSON(file, { ...state, prompts: prompts.map(p => ({ ...p, recorded_at: p.recorded_at ?? now }))
+    await writeJSON(file, { ...state, closed_responses: closed.slice(-4), prompts: prompts.map(p => ({ ...p, recorded_at: p.recorded_at ?? now }))
       .filter(p => p.recorded_at >= now - 86400_000).slice(-8), instance_origin: config.instance_url, session });
     if (await isOffrecord(session)) await remove(file);
   } finally { await releaseFileLock(lease); }

@@ -102,6 +102,9 @@ export async function manage(args) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   manage(process.argv.slice(2)).then(result => process.stdout.write(JSON.stringify(result) + '\n'))
     .catch(error => {
+      if (error.message === 'hooks_contain_secret') {
+        process.stderr.write('hooks_contain_secret\n'); process.exitCode = 1; return;
+      }
       if (error.message === 'credential_origin_conflict') {
         process.stderr.write('HMP: 同じ keychain account は別 origin に再利用できません。新しい端末名で setup してください。\n');
         process.exitCode = 1; return;

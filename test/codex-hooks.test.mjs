@@ -131,6 +131,36 @@ for (const initial of [null, '{}\n', '{ "hooks" : { } }\n', '{"hooks":{"Stop":[]
     else assert.equal(await readConfig(f), initial);
   });
 }
+test('secret hooks stop install, remove and restore before any backup or write', async t => {
+  for (const action of ['install', 'remove', 'restore']) {
+    const f = await fixture(t);
+    let id;
+    if (action !== 'install') {
+      const record = success(await manage(f, 'install'));
+      id = record.backup.split('/')[1].replace('.json', '');
+    } else await config(f, '{}');
+    const text = JSON.stringify({ ...JSON.parse(await readConfig(f)), otherTool: { command: 'tool --token=synthetic-private-value' } });
+    await writeFile(join(f.home, '.codex/hooks.json'), text);
+    const backups = await f.names('backups'), changes = await f.names('changes');
+    const saved = await f.read('codex-hooks-state.json').catch(() => null);
+    const result = action === 'restore' ? await f.run('manage.mjs', ['restore', id]) : await manage(f, action);
+    assert.equal(result.code, 1, action);
+    assert.equal(result.stderr.trim(), 'hooks_contain_secret', action);
+    assert.equal(await readConfig(f), text);
+    assert.deepEqual(await f.names('backups'), backups);
+    assert.deepEqual(await f.names('changes'), changes);
+    assert.deepEqual(await f.read('codex-hooks-state.json').catch(() => null), saved);
+  }
+});
+test('hook state stores only presence metadata and backups keep the secret-free full text', async t => {
+  const f = await fixture(t); await config(f, beforeText);
+  const first = success(await manage(f, 'install'));
+  const saved = await f.read('codex-hooks-state.json');
+  assert.deepEqual(saved, { file_present: true, hooks_present: true, events_present: ['UserPromptSubmit', 'Stop'] });
+  assert.equal(JSON.stringify(saved).includes('other-tool'), false);
+  assert.equal((await f.read(first.backup)).codex_hooks.text, beforeText);
+});
+
 test('manager rejects symlinked settings and malformed hooks without changing them or making backups', async t => {
   for (const mode of ['file-link', 'directory-link', 'invalid', 'duplicate']) {
     const f = await fixture(t);
@@ -210,3 +240,13 @@ for (const mode of ['outside', 'prefix-sibling', 'directory-link', 'file-link', 
     quiet(await launcher(f)); await assert.rejects(stat(join(f.home, 'probe.json')), { code: 'ENOENT' });
   });
 }
+
+test('legacy hook state is reduced to presence metadata before it is backed up again', async t => {
+  const f = await fixture(t); await config(f, beforeText);
+  await f.write('codex-hooks-state.json', { baseline: beforeText });
+  const result = success(await manage(f, 'install'));
+  const saved = await f.read('codex-hooks-state.json');
+  assert.equal('baseline' in saved, false);
+  assert.deepEqual((await f.read(result.backup)).codex_hooks.state, saved);
+  success(await manage(f, 'remove')); assert.equal(await readConfig(f), beforeText);
+});

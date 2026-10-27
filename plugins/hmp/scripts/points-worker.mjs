@@ -85,8 +85,15 @@ export async function runPointsClaude(directory, contract, sentences, timeoutMs,
 export async function runPointsWorker(config, summary, { remaining = Infinity } = {}) {
   const token = await loadToken(config);
   if (await paused() || !await ownsWorkerLock()) return;
+  let initial;
+  try { initial = serverSummary(await request(config, token, '/api/client/config', { deadline: Date.now() + 8000, timeout: 8000 })); }
+  catch { return; }
+  if (initial.paused) return;
   try { await flush(config, token, { deadline: Date.now() + 8000, max: 200 }); }
-  catch { await recordFailure(config, 'events_unavailable'); }
+  catch (e) {
+    if (e.message === 'client_source_paused') return;
+    await recordFailure(config, 'events_unavailable');
+  }
   if (!token) { await recordFailure(config, 'events_unavailable'); return; }
   const limits = pointsLimits(summary.points.limits);
   limits.max_turns_per_run = Math.min(limits.max_turns_per_run, remaining);
@@ -159,7 +166,10 @@ export async function runPointsWorker(config, summary, { remaining = Infinity } 
           }, deadline: Date.now() + 8000, timeout: 8000 });
           if (['accepted', 'already_done'].includes(receipt.status)) await finish();
           else await fail('points_rejected');
-        } catch { await fail('points_unavailable'); }
+        } catch (e) {
+          if (e.message === 'client_source_paused') { outcome.stopped = true; return outcome; }
+          await fail('points_unavailable');
+        }
       }
       if (launches >= limits.max_turns_per_run) return outcome;
       let fresh;

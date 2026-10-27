@@ -12,7 +12,7 @@ export async function request(config, token, path, { body, deadline = Date.now()
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-HMP-Client-Version': CLIENT_VERSION },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
-    if (!response.ok) throw Error('http_error');
+    if (!response.ok && response.status !== 503) throw Error('http_error');
     let text = '', bytes = 0;
     const decoder = new TextDecoder();
     for await (const chunk of response.body) {
@@ -20,7 +20,14 @@ export async function request(config, token, path, { body, deadline = Date.now()
       if (bytes > 128 * 1024) { controller.abort(); throw Error('response_limit'); }
       text += decoder.decode(chunk, { stream: true });
     }
-    return JSON.parse(text + decoder.decode());
+    text += decoder.decode();
+    if (!response.ok) {
+      let sourcePaused = false;
+      try { sourcePaused = JSON.parse(text)?.error === 'client_source_paused'; } catch {}
+      if (sourcePaused) throw Object.assign(Error('client_source_paused'), { status: 503 });
+      throw Error('http_error');
+    }
+    return JSON.parse(text);
   } finally { clearTimeout(timer); }
 }
 export function serverSummary(value) {

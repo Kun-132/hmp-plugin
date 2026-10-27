@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { redact } from './events.mjs';
 import { pathFor, privateDir, readJSON, readText, writeJSON } from './state.mjs';
 
 const events = ['UserPromptSubmit', 'Stop', 'SessionStart'];
@@ -99,13 +100,13 @@ function edit(text, action, baseline) {
       }
       root = validate(text);
       const hooks = member(root, 'hooks'), groups = hooks && member(hooks, event);
-      if (groups?.items.length === 0 && baseline?.hooks?.[event] === undefined) {
+      if (groups?.items.length === 0 && !baseline.events_present.includes(event)) {
         text = discard(text, hooks, hooks.items.findIndex(item => item.key === event));
       }
     }
     root = validate(text);
     const hooks = member(root, 'hooks');
-    if (hooks?.items.length === 0 && baseline?.hooks === undefined) text = discard(text, root, root.items.findIndex(item => item.key === 'hooks'));
+    if (hooks?.items.length === 0 && !baseline.hooks_present) text = discard(text, root, root.items.findIndex(item => item.key === 'hooks'));
   }
   validate(text);
   return text;
@@ -133,9 +134,29 @@ async function writeText(path, text, hmp = false) {
   await chmod(path, 0o600);
   if (await readText(path) !== text) throw Error('verification_failed');
 }
-const state = () => readJSON(statePath()).catch(e => { if (e.code === 'ENOENT') return null; throw e; });
+function presence(text) {
+  const root = validate(text ?? '{}').value;
+  return { file_present: text !== null, hooks_present: root.hooks !== undefined,
+    events_present: events.filter(event => root.hooks?.[event] !== undefined) };
+}
+function metadata(value) {
+  if (value === null) return null;
+  if (!object(value)) throw Error('invalid_state');
+  if (value.baseline === null || typeof value.baseline === 'string') return presence(value.baseline);
+  if (typeof value.file_present !== 'boolean' || typeof value.hooks_present !== 'boolean' ||
+      !Array.isArray(value.events_present) || value.events_present.some(event => !events.includes(event))) throw Error('invalid_state');
+  return { file_present: value.file_present, hooks_present: value.hooks_present, events_present: value.events_present };
+}
+const state = async () => metadata(await readJSON(statePath()).catch(e => { if (e.code === 'ENOENT') return null; throw e; }));
+function rejectSecrets(text) {
+  if (text === null) return;
+  const decoded = JSON.stringify(JSON.parse(text));
+  if (redact(text) !== text || redact(decoded) !== decoded) throw Error('hooks_contain_secret');
+}
 const digest = text => text === null ? null : createHash('sha256').update(text).digest('hex');
 async function change(before, after, nextState, action, launcher = false) {
+  rejectSecrets(before);
+  rejectSecrets(after);
   const id = `${Date.now()}-${process.pid}`, backup = `backups/${id}.json`;
   await writeJSON(pathFor(backup), { codex_hooks: { text: before, state: await state() } }, true);
   const counts = (text, event) => (JSON.parse(text ?? '{}').hooks?.[event] ?? [])
@@ -167,16 +188,14 @@ export async function codexHooks(action) {
   const before = await currentText(), root = validate(before ?? '{}').value;
   if (action === 'status') return { installed: events.every(event => root.hooks?.[event]?.some(group => group.hooks.some(hook => owned(hook, event)))) };
   const saved = await state();
-  if (saved && !(saved.baseline === null || typeof saved.baseline === 'string')) throw Error('invalid_state');
-  const baseline = saved ? saved.baseline : before;
-  let after = edit(before ?? '{}', action, JSON.parse(baseline ?? '{}'));
-  if (action === 'remove' && baseline === null && Object.keys(JSON.parse(after)).length === 0) after = null;
+  const baseline = saved ?? presence(before);
+  let after = edit(before ?? '{}', action, baseline);
+  if (action === 'remove' && !baseline.file_present && Object.keys(JSON.parse(after)).length === 0) after = null;
   if (action === 'remove' && before === after && !saved) return { installed: false };
-  return change(before, after, action === 'install' ? { baseline } : null, action, action === 'install');
+  return change(before, after, action === 'install' ? baseline : null, action, action === 'install');
 }
 export async function restoreCodexHooks(backup) {
-  if (!object(backup) || !(backup.text === null || typeof backup.text === 'string') ||
-      !(backup.state === null || object(backup.state) && (backup.state.baseline === null || typeof backup.state.baseline === 'string'))) throw Error('invalid_backup');
+  if (!object(backup) || !(backup.text === null || typeof backup.text === 'string')) throw Error('invalid_backup');
   if (backup.text !== null) validate(backup.text);
-  return change(await currentText(), backup.text, backup.state, 'restore');
+  return change(await currentText(), backup.text, metadata(backup.state), 'restore');
 }
