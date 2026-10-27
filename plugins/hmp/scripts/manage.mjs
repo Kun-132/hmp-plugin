@@ -4,7 +4,10 @@ import { loadConfig, loadToken, validateConfig, validateMcp, bindCredentials, CL
 import { readJSON, writeJSON, pathFor } from './state.mjs';
 import { manual, request } from './client.mjs';
 import { redact, spoolStatus } from './events.mjs';
+import { turnStatus } from './turns.mjs';
 import { verifyWorker } from './worker.mjs';
+import { codexHooks, restoreCodexHooks } from './codex-hooks.mjs';
+import { pointsStats, recordBacklog, backlogHistory } from './points-stats.mjs';
 
 export async function changeFiles(changes) {
   for (const [name, value] of Object.entries(changes)) {
@@ -52,6 +55,10 @@ export async function changeFiles(changes) {
 }
 export async function manage(args) {
   const [command, ...rest] = args;
+  if (command === 'codex-hooks') {
+    if (rest.length !== 1) throw Error('usage');
+    return codexHooks(rest[0]);
+  }
   if (command === 'setup') {
     if (rest.length !== 2) throw Error('usage');
     const config = validateConfig({ instance_url: rest[0], device: rest[1] });
@@ -65,7 +72,7 @@ export async function manage(args) {
     const config = await loadConfig(), token = await loadToken(config);
     const remote = await request(config, token, '/api/client/config', manual());
     const label = typeof remote.instance_label === 'string' ? remote.instance_label : '';
-    const worker = await verifyWorker();
+    const worker = await verifyWorker(remote.points ? 'points' : 'legacy');
     return { instance_label: redact(label.split(token).join('<SECRET>')).replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, 80), connected: true, worker };
   }
   if (command === 'status') {
@@ -73,13 +80,20 @@ export async function manage(args) {
     const last = await readJSON(pathFor('last-send.json')).catch(e => { if (e.code === 'ENOENT') return null; throw e; });
     let pending = null;
     const config = await loadConfig(), token = await loadToken(config);
-    try { pending = (await import('./client.mjs')).serverSummary(await request(config, token, '/api/client/config', manual())).pending; } catch {}
+    try {
+      const summary = (await import('./client.mjs')).serverSummary(await request(config, token, '/api/client/config', manual()));
+      pending = summary.pending;
+      // Local metrics must not hide a successfully refreshed server status.
+      await recordBacklog(config, summary).catch(() => {});
+    } catch {}
     return { client_version: CLIENT_VERSION, ...await spoolStatus(config),
-      last_send: last?.sent_at ?? null, pending };
+      last_send: last?.sent_at ?? null, turns: await turnStatus(config), pending,
+      points_stats: await pointsStats(config).catch(() => null), backlog_history: await backlogHistory(config).catch(() => null) };
   }
   if (command === 'restore') {
     if (!/^\d+-\d+$/.test(rest[0]) || rest.length !== 1) throw Error('invalid_backup');
     const before = await readJSON(pathFor(`backups/${rest[0]}.json`));
+    if (Object.keys(before).length === 1 && before.codex_hooks) return restoreCodexHooks(before.codex_hooks);
     // Missing originals become inert settings; restoration never deletes a file.
     const changes = {};
     for (const [name, value] of Object.entries(before)) {
@@ -95,6 +109,9 @@ export async function manage(args) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   manage(process.argv.slice(2)).then(result => process.stdout.write(JSON.stringify(result) + '\n'))
     .catch(error => {
+      if (error.message === 'hooks_contain_secret') {
+        process.stderr.write('hooks_contain_secret\n'); process.exitCode = 1; return;
+      }
       if (error.message === 'credential_origin_conflict') {
         process.stderr.write('HMP: 同じ keychain account は別 origin に再利用できません。新しい端末名で setup してください。\n');
         process.exitCode = 1; return;

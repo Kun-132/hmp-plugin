@@ -15,6 +15,7 @@ test('marketplace/plugin/hooks follow required structure without manifest versio
   for (const [event, entries] of Object.entries(config.hooks)) {
     assert.equal(entries.length, 1); assert.equal(entries[0].hooks.length, 1);
     const hook = entries[0].hooks[0]; assert.equal(hook.type, 'command'); assert.equal(hook.timeout, 5);
+    assert.equal(hook.async === true, event === 'Stop');
     assert.equal(hook.command, `node "\${CLAUDE_PLUGIN_ROOT}/scripts/hook.mjs" ${event}`);
   }
   for (const name of ['setup', 'pause', 'status', 'onboard']) {
