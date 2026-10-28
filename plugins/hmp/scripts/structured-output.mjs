@@ -88,6 +88,38 @@ export function structuredCodexArgs(directory) {
     '--output-last-message', join(directory, 'out.json'), '--output-schema', join(directory, 'output-schema.json'),
   ] });
 }
+export function strictSchema(schema) {
+  const result = structuredClone(schema);
+  if (!result || typeof result !== 'object') return result;
+  if (result.type === 'object' || (Array.isArray(result.type) && result.type.includes('object')) || result.properties) {
+    const required = new Set(result.required ?? []);
+    result.properties = Object.fromEntries(Object.entries(result.properties ?? {}).map(([key, value]) => {
+      const property = strictSchema(value);
+      if (required.has(key)) return [key, property];
+      if (property.enum && !property.enum.includes(null)) property.enum.push(null);
+      if (typeof property.type === 'string') property.type = [...new Set([property.type, 'null'])];
+      else if (Array.isArray(property.type)) {
+        if (!property.type.includes('null')) property.type.push('null');
+      } else return [key, { anyOf: [property, { type: 'null' }] }];
+      return [key, property];
+    }));
+    result.required = Object.keys(result.properties);
+    result.additionalProperties = false;
+  }
+  if (result.items) result.items = strictSchema(result.items);
+  for (const key of ['anyOf', 'oneOf', 'allOf']) {
+    if (result[key]) result[key] = result[key].map(strictSchema);
+  }
+  return result;
+}
+export function stripOptionalNulls(value, schema) {
+  if (!schema || value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(item => stripOptionalNulls(item, schema.items));
+  const properties = schema.properties ?? {}, required = new Set(schema.required ?? []);
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key, item]) => !(item === null && Object.hasOwn(properties, key) && !required.has(key)))
+    .map(([key, item]) => [key, stripOptionalNulls(item, properties[key])]));
+}
 export async function runStructuredCodex(contract, input, validate, timeoutMs, { binary = 'codex', tempRoot = tmpdir() } = {}) {
   const started = Date.now();
   let directory;
@@ -96,7 +128,7 @@ export async function runStructuredCodex(contract, input, validate, timeoutMs, {
     directory = realpathSync(directory);
     await chmod(directory, 0o700);
     await ensureCodexState();
-    await writeFile(join(directory, 'output-schema.json'), JSON.stringify(contract.output_schema), { mode: 0o600, flag: 'wx' });
+    await writeFile(join(directory, 'output-schema.json'), JSON.stringify(strictSchema(contract.output_schema)), { mode: 0o600, flag: 'wx' });
     await writeFile(join(directory, 'out.json'), '', { mode: 0o600, flag: 'wx' });
     const result = await new Promise(resolve => {
       const env = codexEnv();
@@ -139,7 +171,7 @@ export async function runStructuredCodex(contract, input, validate, timeoutMs, {
     });
     if (result.code) return result;
     try {
-      const output = await readJSON(join(directory, 'out.json'));
+      const output = stripOptionalNulls(await readJSON(join(directory, 'out.json')), contract.output_schema);
       if (!validate(output, contract.output_schema)) throw Error();
       return { output, usage: { ...result.usage, duration_ms: Date.now() - started } };
     } catch { return { code: 'output_invalid' }; }

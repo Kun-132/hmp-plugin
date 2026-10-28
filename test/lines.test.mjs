@@ -36,8 +36,17 @@ const item = n => ({ capture_id: 'synthetic-capture-' + n, lease_id: 'synthetic-
   facts: [{ id: 'synthetic-fact', text: '合成の判断', speaker_role: 'user', stance: 'own_statement' }],
   candidates: [], suggested: { prev: [], seen: [] } });
 const fake = `const fs = require('node:fs');
+const assert = require('node:assert/strict');
 const args = process.argv.slice(2), codex = args.includes('exec');
 const schema = codex ? JSON.parse(fs.readFileSync('output-schema.json')) : JSON.parse(args[args.indexOf('--json-schema') + 1]);
+function strict(s) {
+  if (s.properties) {
+    assert.deepEqual(s.required, Object.keys(s.properties)); assert.equal(s.additionalProperties, false);
+    Object.values(s.properties).forEach(strict);
+  }
+  if (s.items) strict(s.items);
+}
+if (codex) strict(schema);
 const line = !!schema.properties.blocks;
 let input = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', c => input += c);
 process.stdin.on('end', () => {
@@ -46,6 +55,11 @@ process.stdin.on('end', () => {
   if (line && mode === 'timeout') { setTimeout(() => {}, 30000); return; }
   if (line && mode === 'failed') { process.stderr.write('SYNTHETIC_PRIVATE_ERROR'); process.exit(1); }
   const output = line ? { blocks: [${JSON.stringify(block)}] } : { points: [] };
+  if (line && codex) Object.assign(output.blocks[0], { reason: null, condition: null, ground_for_marker: null, governs: null });
+  if (line && codex && mode === 'nested') Object.assign(output.blocks[0], { reason: '合成の理由', governs: [
+    { decision_type: 'synthetic', scope_kind: 'all', scope_ref: null, polarity: 'applies' }
+  ] });
+  if (line && mode === 'required-null') output.blocks[0].text = null;
   if (line && mode === 'invalid') output.blocks[0].private = 'SYNTHETIC_PRIVATE_ERROR';
   if (line && mode === 'pause') fs.writeFileSync(process.env.HOME + '/.hmp/pause', JSON.stringify({ until: new Date(Date.now() + 60000).toISOString() }));
   if (codex) { fs.writeFileSync('out.json', JSON.stringify(output)); process.stdout.write('{"type":"turn.completed"}'); }
@@ -94,12 +108,21 @@ for (const engine of ['claude', 'codex']) for (const status of ['accepted', 'alr
     }
     const all = await launches(f); assert.equal(all.length, 3);
     for (const launch of all.filter(l => l.line)) {
-      assert.deepEqual(launch.schema, schema);
       if (engine === 'claude') {
+        assert.deepEqual(launch.schema, schema);
         const args = pointsArgs(schema), system = args.indexOf('--system-prompt') + 1;
         args[system] = contract.instructions;
         assert.deepEqual(launch.args, args); assert.deepEqual(JSON.parse(launch.input), item(all.indexOf(launch) - 1));
       } else {
+        const expected = structuredClone(schema), fields = expected.properties.blocks.items;
+        fields.required = Object.keys(fields.properties);
+        for (const key of ['reason', 'condition', 'ground_for_marker', 'governs']) {
+          fields.properties[key].type = [fields.properties[key].type, 'null'];
+        }
+        const govern = fields.properties.governs.items;
+        govern.required = Object.keys(govern.properties);
+        govern.properties.scope_ref.type = ['string', 'null'];
+        assert.deepEqual(launch.schema, expected);
         await withTestEnv(f.env, () => assert.deepEqual(launch.args, pointsCodexArgs(launch.cwd)));
         assert.equal(launch.input, contract.instructions + '\n\n' + JSON.stringify(item(all.indexOf(launch) - 1)));
         await assert.rejects(stat(launch.cwd), { code: 'ENOENT' });
@@ -111,6 +134,26 @@ for (const engine of ['claude', 'codex']) for (const status of ['accepted', 'alr
     assert.equal((await f.read('lines-usage.json')).launches, 2); assert.equal(await lastFailure(f), null);
   });
 }
+
+test('codex: optional nested nulls are removed while supplied optional values survive line submission', async t => {
+  const f = await seed(t, { engine: 'codex' });
+  await writeFile(join(f.home, 'line-mode'), 'nested');
+  ok(await f.run('worker.mjs'));
+  const submits = endpoint(f, 'submit');
+  assert.equal(submits.length, 2);
+  for (const request of submits) assert.deepEqual(request.body.blocks, [{ ...block, reason: '合成の理由', governs: [
+    { decision_type: 'synthetic', scope_kind: 'all', polarity: 'applies' },
+  ] }]);
+  assert.equal(await lastFailure(f), null);
+});
+
+test('codex: a required null remains invalid and is never submitted', async t => {
+  const f = await seed(t, { engine: 'codex' });
+  await writeFile(join(f.home, 'line-mode'), 'required-null');
+  ok(await f.run('worker.mjs'));
+  assert.equal(endpoint(f, 'submit').length, 0);
+  assert.equal((await lastFailure(f)).code, 'lines_output_invalid');
+});
 
 test('serverSummary preserves only the served line contract and known lower limits', () => {
   assert.equal(serverSummary({}).lines, undefined);
