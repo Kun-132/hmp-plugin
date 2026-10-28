@@ -117,7 +117,7 @@ test('worker flushes events then submits structured points with capture IDs, sen
   const events = f.requests[1].body.events, body = f.requests[2].body;
   assert.deepEqual(body.turn, Object.fromEntries(events.map(e => [e.kind, 'cap_' + e.client_event_id.slice(4)])));
   assert.deepEqual(body.sentences, [{ n: 1, part: 'prompt', text: '合成の判断。' }, { n: 2, part: 'prompt', text: '次へ!' }, { n: 3, part: 'response', text: '合成の回答。' }]);
-  assert.deepEqual(body.points, [point]); assert.equal(body.client_version, '0.2.0'); assert.equal(body.model, 'sonnet');
+  assert.deepEqual(body.points, [point]); assert.equal(body.client_version, '0.3.0'); assert.equal(body.model, 'sonnet');
   assert.equal(body.usage.input_tokens, 302); assert.equal(body.usage.output_tokens, 45);
   assert.deepEqual(Object.keys(body.usage).sort(), ['duration_ms', 'input_tokens', 'output_tokens', 'turn_ended_at']);
   assert.ok(body.usage.duration_ms >= 0); assert.ok(body.usage.turn_ended_at > 0);

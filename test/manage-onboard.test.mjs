@@ -108,7 +108,7 @@ test('pause and resume record changes, status returns only metadata', async t =>
   assert.ok(Date.parse((await f.read('pause')).until) <= Date.now());
   const status = await f.run('manage.mjs', ['status']); assert.equal(status.code, 0);
   const { points_stats, backlog_history, ...existing } = JSON.parse(status.stdout);
-  assert.deepEqual(existing, { client_version: '0.2.0', engine: 'claude', spool: 0, spool_held: 0, last_send: null, turns: { count: 0, oldest: null, last_failure: null }, pending: { extraction: 4, lines: 2 } });
+  assert.deepEqual(existing, { client_version: '0.3.0', engine: 'claude', spool: 0, spool_held: 0, last_send: null, turns: { count: 0, oldest: null, last_failure: null }, pending: { extraction: 4, lines: 2 } });
   assert.equal(points_stats.all.count, 0);
   assert.equal(backlog_history.latest.extraction, 4);
 });

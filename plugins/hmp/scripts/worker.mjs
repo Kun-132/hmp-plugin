@@ -248,7 +248,7 @@ export async function verifyWorker(mode = 'legacy') {
     return { ready: true, lines: result.lines, server: 'hmp', url: config.instance_url + '/mcp' };
   } finally { await rmdir(directory).catch(() => {}); }
 }
-export async function runWorker({ remaining = Infinity, restarted = false } = {}) {
+export async function runWorker({ remaining = Infinity, restarted = false, linesState = { claims: 0, stopped: false } } = {}) {
   if (!await acquireLock()) return;
   let directory, pointsOutcome, pointsConfig;
   try {
@@ -259,7 +259,7 @@ export async function runWorker({ remaining = Infinity, restarted = false } = {}
     if (await paused()) return;
     if (summary.points) {
       pointsConfig = config;
-      pointsOutcome = await (await import('./points-worker.mjs')).runPointsWorker(config, summary, { remaining });
+      pointsOutcome = await (await import('./points-worker.mjs')).runPointsWorker(config, summary, { remaining, linesState });
       return;
     }
     if (!limits.max_runs_per_day || !limits.max_items_per_run || !limits.max_minutes) return;
@@ -309,7 +309,7 @@ export async function runWorker({ remaining = Infinity, restarted = false } = {}
     if (directory) await rmdir(directory).catch(() => {});
     await releaseLock();
     if (!restarted && pointsOutcome?.remaining > 0 && (await readyTurns(pointsConfig)).length)
-      await runWorker({ remaining: pointsOutcome.remaining, restarted: true });
+      await runWorker({ remaining: pointsOutcome.remaining, restarted: true, linesState });
   }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

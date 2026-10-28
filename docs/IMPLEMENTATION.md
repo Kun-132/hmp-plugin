@@ -1,3 +1,14 @@
+# 0.3.0 の要点直後の線
+
+2026-10-28。server `origin/claude/lines-after-points` の SPEC 項目7–11、`client-api.ts`、`lines/client-contract.ts`、`client-api-lines.test.ts` を参照。サーバー側は変更していない。
+
+- `points-worker.mjs` は受理済みターンの待ちを消した後、`lines-worker.mjs` で端末の claim → モデル → submit を最大2件処理する。起動時に取り直した config の `lines` だけを使い、古いキャッシュでは有効にしない。
+- `structured-output.mjs` に要点の既存 Claude/Codex 起動・出力検査・環境隔離・一時ファイル削除を移し、線でも共用する。Claude は配布 instructions を system prompt、item を標準入力に渡す。Codex は要点と同じ閉じた起動で instructions と item を標準入力に渡す。Schema は配布値をそのまま使う。
+- 線の固定上限は2 claim/ターン・4 claim/処理役・600起動/UTC日・最大90秒/起動（要点の時間上限以下）。`lines.limits.{max_claims_per_turn,max_claims_per_run,max_launches_per_day,max_seconds_per_turn}` は下げる方向だけ。別の `lines-usage.json` で起動前に加算する。空の claim は日次起動数を使わず、失敗した起動は返却しない。worker の解除後再起動にも claim 数と停止状態を引き継ぐ。
+- 線の例外・拒否・不正出力は固定コードだけを記録して、その実行の線を止める。記録自体の失敗も要点に伝えない。config に `lines` がない場合と404/426は無記録で省く。一時停止・ロック所有権・セッションのオフレコを claim 前・起動前・submit 前に確認する。
+- 要点の300件/日・10件/回と既存 MCP の線の段は変更していない。認証・設定・信頼の操作は追加していない。`CLIENT_VERSION` は0.3.0。
+- `test/lines.test.mjs` は合成データ・偽 CLI・モック応答で、新旧サーバー、accepted/already_done、Claude/Codex の固定引数・配布 Schema・送信形、失敗隔離、件数・時間・日次上限、停止を検査する。検証は `HMP_TEST_TRANSPORT=ipc npm test`（外部通信なし）。
+
 # 2人目レビューの修正（2026-10-27）
 
 - 入力をセッション内の順番付き配列に保持し、両側に識別子があれば `prompt_id`（Codex は `turn_id`）で、片方になければ FIFO で Stop と組む。背景の仕事が残る Stop は回答だけを覚える。完了判定には本人の言葉と答えの両方の識別子を使う。

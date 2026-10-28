@@ -27,7 +27,7 @@ test('preview is read-only and confirm uses the scoped session API, resume sends
   assert.equal(f.requests.length, 0);
   const preview = success(await f.run('forget.mjs', ['synthetic-session', '--preview']));
   assert.equal(preview.forgotten.captures, 2);
-  assert.deepEqual(f.requests[0].body, { client_version: '0.2.0', device: 'synthetic-device', session: 'synthetic-session', scope: 'session', dry_run: true });
+  assert.deepEqual(f.requests[0].body, { client_version: '0.3.0', device: 'synthetic-device', session: 'synthetic-session', scope: 'session', dry_run: true });
   const result = success(await f.run('forget.mjs', ['synthetic-session', '--confirm']));
   assert.equal(f.requests[1].url, '/api/client/forget'); assert.equal('dry_run' in f.requests[1].body, false);
   assert.equal(result.retained_notice, 'Synthetic retained notice');

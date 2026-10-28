@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { pathFor, readJSON, writeJSON } from './state.mjs';
 
-export const CLIENT_VERSION = '0.2.0';
+export const CLIENT_VERSION = '0.3.0';
 export function validateConfig(value) {
   if (!value || typeof value.instance_url !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value.device ?? '')) throw Error('invalid_config');
   if (Object.hasOwn(value, 'engine') && !['claude', 'codex'].includes(value.engine)) throw Error('invalid_engine');
