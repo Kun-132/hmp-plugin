@@ -1,5 +1,5 @@
+import { spawnCommand, killTree } from './platform.mjs';
 import { pathFor, readJSON, writeJSON } from './state.mjs';
-import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { mkdtemp, chmod, rm, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -27,8 +27,8 @@ export async function runMcpCodex(config, stageTools, timeoutMs, { binary = 'cod
       let child;
       const previousMask = process.umask(0o077);
       try {
-        child = spawn(binary, mcpCodexArgs(config, stageTools, directory), {
-          cwd: directory, env: { ...codexEnv(), TMPDIR: directory }, detached: true, stdio: ['pipe', 'pipe', 'ignore'],
+        child = spawnCommand(binary, mcpCodexArgs(config, stageTools, directory), {
+          cwd: directory, env: { ...codexEnv(), TMPDIR: directory }, stdio: ['pipe', 'pipe', 'ignore'],
         });
       } catch { resolve(failed('spawn_failed')); return; }
       finally { process.umask(previousMask); }
@@ -37,7 +37,7 @@ export async function runMcpCodex(config, stageTools, timeoutMs, { binary = 'cod
       let pending = '', bytes = 0, reason, claims = 0, submits = 0, completed = false, usage = {};
       const stop = code => {
         reason ??= code;
-        if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
+        killTree(child.pid);
       };
       const consume = line => {
         if (!line.trim() || reason) return;

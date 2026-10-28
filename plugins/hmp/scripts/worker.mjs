@@ -1,10 +1,8 @@
 import { acquireFileLock, readLock, reclaimLock, ownsFileLock, releaseFileLock } from './locks.mjs';
-import { spawn, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { lstatSync, realpathSync } from 'node:fs';
+import { platformEnv, spawnCommand, execCommand, killTree, permissionPath, canonicalDirectory, insideDirectory } from './platform.mjs';
 import { mkdtemp, rmdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
 import { loadConfig, validateMcp } from './config.mjs';
@@ -61,8 +59,8 @@ export async function releaseLock() {
   await releaseFileLock(workerLease);
   workerLease = null;
 }
-export function claudeEnv() {
-  const env = {};
+export function claudeEnv(platform = process.platform) {
+  const env = platformEnv(process.env, platform);
   for (const key of ['HOME', 'CLAUDE_CONFIG_DIR', 'PATH', 'USER', 'LOGNAME', 'TMPDIR', 'SHELL', 'LANG', 'LC_ALL', 'LC_CTYPE']) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
@@ -76,14 +74,14 @@ export function mcpPrompt(claimTool) {
   return `${claimTool} を extractor="hmp-plugin"、lease_seconds=900 で1回だけ呼ぶ。item が null なら終了。それ以外は返り値 instructions と ${claimTool === POINT_TOOLS[0] ? 'output_schema' : 'output_contract'} に従って処理し、対応する submit を合計3回以内で呼んで終了。次の claim は呼ばない。`;
 }
 export function claudeArgs(directory, { verify = false, claimTool = EXTRACTION_TOOLS[0], mcpOnly = claimTool === POINT_TOOLS[0], toolFree = false,
-  disallowedTools = [], discoverTools = false } = {}) {
+  disallowedTools = [], discoverTools = false, platform = process.platform } = {}) {
   const stageTools = toolsForClaim(claimTool);
   const denied = disallowedTools.filter(tool => typeof tool === 'string' && tool.startsWith('mcp__hmp__') && !stageTools.includes(tool));
   return ['-p', ...(mcpOnly ? ['--model', 'sonnet'] : []), '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
     '--strict-mcp-config', ...(toolFree ? [] : ['--mcp-config', pathFor('mcp.json')]), '--setting-sources', '',
     '--settings', JSON.stringify({ disableAllHooks: true, enabledPlugins: {},
       permissions: { blockReadsOutsideWorkingDirectories: true, additionalDirectories: [], ...(verify ? { ask: ['mcp__*'] } : {}) } }),
-    '--tools', verify || mcpOnly ? '' : 'Read', ...(verify ? [] : ['--allowedTools', ...stageTools, ...(mcpOnly ? [] : [`Read(/${directory}/**)`])]),
+    '--tools', verify || mcpOnly ? '' : 'Read', ...(verify ? [] : ['--allowedTools', ...stageTools, ...(mcpOnly ? [] : [`Read(/${permissionPath(directory, platform)}/**)`])]),
     ...(mcpOnly && denied.length ? ['--disallowedTools', ...denied] : []),
     '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--disable-slash-commands',
     '--no-chrome', '--no-session-persistence', '--max-turns', discoverTools ? '0' : '12',
@@ -97,12 +95,7 @@ function connectedHmp(event) {
 export function connectedWorker(event, stageTools = EXTRACTION_TOOLS) {
   return Boolean(connectedHmp(event) && stageTools.every(tool => event.tools?.includes(tool)));
 }
-function inside(directory, path) {
-  if (typeof path !== 'string' || !path.startsWith('/') || path.split(/[\\/]/).includes('..')) return false;
-  try { return resolve(path).startsWith(directory + sep) && realpathSync(path).startsWith(directory + sep) && lstatSync(path).isFile(); }
-  catch { return false; }
-}
-export function createStreamGuard(directory, claimTool, { mcpOnly = claimTool === POINT_TOOLS[0] } = {}) {
+export function createStreamGuard(directory, claimTool, { mcpOnly = claimTool === POINT_TOOLS[0], platform = process.platform, fs } = {}) {
   const stageTools = toolsForClaim(claimTool);
   const calls = new Map(), partials = new Map();
   let claims = 0, submits = 0;
@@ -115,7 +108,7 @@ export function createStreamGuard(directory, claimTool, { mcpOnly = claimTool ==
       if (block.name.includes('__claim_') && (block.name !== claimTool || ++claims > 1)) throw Error('claim_limit');
       if (block.name.includes('__submit_') && ++submits > 3) throw Error('submit_limit');
     }
-    if (complete && block.name === 'Read' && !inside(directory, block.input?.file_path)) throw Error('forbidden_read');
+    if (complete && block.name === 'Read' && !insideDirectory(directory, block.input?.file_path, { platform, ...fs })) throw Error('forbidden_read');
   }
   return event => {
     if (event.type === 'stream_event') {
@@ -137,20 +130,20 @@ export function createStreamGuard(directory, claimTool, { mcpOnly = claimTool ==
   };
 }
 export function runClaude(directory, claimTool, timeoutMs, { binary = 'claude', verify = false, mcpOnly = claimTool === POINT_TOOLS[0], toolFree = false,
-  disallowedTools = [], discoverTools = false, checkTools = false } = {}) {
+  disallowedTools = [], discoverTools = false, checkTools = false, platform = process.platform, run } = {}) {
   const stageTools = toolsForClaim(claimTool);
   const started = Date.now();
   return new Promise(resolvePromise => {
     let child, timer, bytes = 0, pending = '', stopped = false, status = 'failed', reason, connected = false, completed = false, lines = false, submits = 0;
     const decoder = new StringDecoder('utf8');
-    const guard = createStreamGuard(directory, claimTool, { mcpOnly });
+    const guard = createStreamGuard(directory, claimTool, { mcpOnly, platform });
     let tools, usage;
     const stop = (code = 'failed') => {
       if (stopped) return;
       stopped = true;
       reason = code;
       status = code === 'tools_missing' ? 'stage_unavailable' : 'failed';
-      if (child?.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
+      killTree(child?.pid, { platform });
     };
     const line = value => {
       if (!value.trim() || stopped) return;
@@ -191,7 +184,8 @@ export function runClaude(directory, claimTool, timeoutMs, { binary = 'claude', 
     };
     const interrupt = () => stop('interrupted');
     try {
-      child = spawn(binary, claudeArgs(directory, { verify, claimTool, mcpOnly, toolFree, disallowedTools, discoverTools }), { cwd: directory, env: claudeEnv(), detached: true, stdio: ['pipe', 'pipe', 'ignore'] });
+      child = spawnCommand(binary, claudeArgs(directory, { verify, claimTool, mcpOnly, toolFree, disallowedTools, discoverTools, platform }),
+        { cwd: directory, env: claudeEnv(platform), stdio: ['pipe', 'pipe', 'ignore'] }, { platform, ...(run ? { run } : {}) });
     } catch {
       resolvePromise({ status: 'failed', reason: 'spawn_failed', lines, submits }); return;
     }
@@ -228,9 +222,9 @@ export async function verifyWorker(mode = 'legacy') {
     return { ready: mcp, mcp, lines: mcp, server: 'hmp', url: config.instance_url + '/mcp' };
   }
   if (mode !== 'points') validateMcp(await readJSON(pathFor('mcp.json')), config);
-  const version = await promisify(execFile)('claude', ['--version'], { env: claudeEnv(), timeout: 1500, maxBuffer: 1024 });
+  const version = await execCommand('claude', ['--version'], { env: claudeEnv(), timeout: 1500, maxBuffer: 1024 });
   if (!supportedVersion(version.stdout)) throw Error('unsupported_claude');
-  const directory = realpathSync(await mkdtemp(join(tmpdir(), 'hmp-worker-')));
+  const directory = canonicalDirectory(await mkdtemp(join(tmpdir(), 'hmp-worker-')));
   try {
     if (mode === 'points') {
       const result = await runClaude(directory, POINT_TOOLS[0], 30_000, { verify: true, toolFree: true });
@@ -276,11 +270,11 @@ export async function runWorker({ remaining = Infinity, restarted = false, lines
       if (i < summary.pending.lines && queue.length < limits.max_items_per_run) queue.push(LINE_TOOLS[0]);
     }
     if (!queue.length) return;
-    const version = await promisify(execFile)('claude', ['--version'], { env: claudeEnv(), timeout: 1500, maxBuffer: 1024 });
+    const version = await execCommand('claude', ['--version'], { env: claudeEnv(), timeout: 1500, maxBuffer: 1024 });
     if (!supportedVersion(version.stdout)) return;
     // Count before launch; crashes cannot refund the daily allowance.
     await writeJSON(pathFor('worker-usage.json'), { day, runs: usage.runs + 1 });
-    directory = realpathSync(await mkdtemp(join(tmpdir(), 'hmp-worker-')));
+    directory = canonicalDirectory(await mkdtemp(join(tmpdir(), 'hmp-worker-')));
     const end = Date.now() + limits.max_minutes * 60_000;
     let launches = 0, extractions = 0, extractionEmpty = false;
     while (queue.length && launches < limits.max_items_per_run) {

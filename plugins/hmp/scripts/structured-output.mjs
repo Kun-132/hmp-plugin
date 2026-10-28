@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawnCommand, killTree } from './platform.mjs';
 import { realpathSync } from 'node:fs';
 import { mkdtemp, chmod, writeFile, rm, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -31,12 +31,15 @@ export async function runStructuredClaude(directory, contract, input, validate, 
   const started = Date.now();
   return new Promise(resolve => {
     let output = '', bytes = 0, failure = null;
-    const child = spawn(binary, structuredArgs(contract.output_schema, systemPrompt), {
-      cwd: directory, env: claudeEnv(), detached: true, stdio: ['pipe', 'pipe', 'ignore'],
-    });
+    let child;
+    try {
+      child = spawnCommand(binary, structuredArgs(contract.output_schema, systemPrompt), {
+        cwd: directory, env: claudeEnv(), stdio: ['pipe', 'pipe', 'ignore'],
+      });
+    } catch { resolve({ code: 'claude_failed' }); return; }
     const stop = code => {
       failure ??= code;
-      if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
+      killTree(child.pid);
     };
     const interrupt = () => stop('claude_failed');
     const timer = setTimeout(() => stop('claude_timeout'), Math.max(1, Math.min(90_000, timeoutMs)));
@@ -88,15 +91,15 @@ export async function runStructuredCodex(contract, input, validate, timeoutMs, {
       let child;
       const previousMask = process.umask(0o077);
       try {
-        child = spawn(binary, structuredCodexArgs(directory), {
-          cwd: directory, env: { ...env, TMPDIR: directory }, detached: true, stdio: ['pipe', 'pipe', 'ignore'],
+        child = spawnCommand(binary, structuredCodexArgs(directory), {
+          cwd: directory, env: { ...env, TMPDIR: directory }, stdio: ['pipe', 'pipe', 'ignore'],
         });
       } catch { resolve({ code: 'codex_unavailable' }); return; }
       finally { process.umask(previousMask); }
       let pending = '', bytes = 0, failure = null, usage = {};
       const stop = code => {
         failure ??= code;
-        if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
+        killTree(child.pid);
       };
       const interrupt = () => stop('codex_failed');
       const timer = setTimeout(() => stop('codex_timeout'), Math.max(1, Math.min(90_000, timeoutMs)));

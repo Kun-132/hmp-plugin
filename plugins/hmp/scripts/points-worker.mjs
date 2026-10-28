@@ -1,5 +1,4 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { execCommand } from './platform.mjs';
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { mkdtemp, rmdir } from 'node:fs/promises';
@@ -160,13 +159,13 @@ export async function runPointsWorker(config, summary, { remaining = Infinity, l
       try {
         if (!mcpReady) {
           if (engine === 'codex') {
-            try { await promisify(execFile)('codex', ['--version'], { env: codexEnv(), timeout: 1500, maxBuffer: 1024 }); }
+            try { await execCommand('codex', ['--version'], { env: codexEnv(), timeout: 1500, maxBuffer: 1024 }); }
             catch { await recordFailure(config, 'mcp_version_failed'); return outcome; }
           } else {
             try { validateMcp(await readJSON(pathFor('mcp.json')), config); }
             catch { await recordFailure(config, 'mcp_config_invalid'); return outcome; }
             let version;
-            try { version = await promisify(execFile)('claude', ['--version'], { env: claudeEnv(), timeout: 1500, maxBuffer: 1024 }); }
+            try { version = await execCommand('claude', ['--version'], { env: claudeEnv(), timeout: 1500, maxBuffer: 1024 }); }
             catch { await recordFailure(config, 'mcp_version_failed'); return outcome; }
             if (!supportedVersion(version.stdout)) { await recordFailure(config, 'mcp_version_unsupported'); return outcome; }
           }

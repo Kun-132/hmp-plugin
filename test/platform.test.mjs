@@ -1,0 +1,73 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { resolveCommand, launchSpec, spawnCommand, killTree, permissionPath, canonicalDirectory, insideDirectory, platformEnv } from '../plugins/hmp/scripts/platform.mjs';
+import { claudeArgs, createStreamGuard, EXTRACTION_TOOLS } from '../plugins/hmp/scripts/worker.mjs';
+
+const winEnv = { PATH: 'C:\\Windows\\system32;"C:\\Users\\synthetic\\.claude-launcher"', PATHEXT: '.COM;.EXE;.BAT;.CMD', COMSPEC: 'C:\\Windows\\system32\\cmd.exe' };
+const shim = 'C:\\Users\\synthetic\\.claude-launcher\\claude.cmd';
+
+test('POSIX launches keep the bare name, a process group and a group kill', () => {
+  assert.equal(resolveCommand('claude', { platform: 'darwin', exists: () => false }), 'claude');
+  const calls = [];
+  spawnCommand('claude', ['-p'], { cwd: '/tmp/x', env: {} }, { platform: 'linux', run: (...a) => calls.push(a) });
+  assert.deepEqual(calls, [['claude', ['-p'], { cwd: '/tmp/x', env: {}, detached: true }]]);
+  const kills = [];
+  killTree(42, { platform: 'darwin', kill: (...a) => kills.push(a), run: () => assert.fail('taskkill on POSIX') });
+  assert.deepEqual(kills, [[-42, 'SIGKILL']]);
+  assert.deepEqual(platformEnv({ USERPROFILE: 'x' }, 'darwin'), {});
+});
+
+test('Windows resolves a .cmd shim from PATH and PATHEXT and runs it through cmd.exe without a window', () => {
+  assert.equal(resolveCommand('claude', { platform: 'win32', env: winEnv, exists: p => p === shim }), shim);
+  assert.equal(resolveCommand('claude', { platform: 'win32', env: winEnv, exists: () => false }), null);
+  assert.throws(() => launchSpec('claude', [], { platform: 'win32', env: winEnv, exists: () => false }), { code: 'ENOENT' });
+  const spec = launchSpec('claude', ['-p', '', '{"a":[]}', 'two words'], { platform: 'win32', env: winEnv, exists: p => p === shim });
+  assert.equal(spec.command, winEnv.COMSPEC);
+  assert.deepEqual(spec.args.slice(0, 3), ['/d', '/s', '/c']);
+  assert.equal(spec.args[3], '"C:\\Users\\synthetic\\.claude-launcher\\claude.cmd ^"-p^" ^"^" ^"{\\^"a\\^":^[^]}^" ^"two^ words^""');
+  assert.deepEqual(spec.options, { windowsVerbatimArguments: true, windowsHide: true });
+  const exe = launchSpec('codex', ['--version'], { platform: 'win32', env: winEnv, exists: p => p.endsWith('codex.exe') });
+  assert.deepEqual(exe, { command: 'C:\\Windows\\system32\\codex.exe', args: ['--version'], options: { windowsHide: true } });
+  const calls = [];
+  spawnCommand('claude', ['-p'], { env: winEnv }, { platform: 'win32', run: (...a) => calls.push(a), exists: p => p === shim });
+  assert.equal(calls[0][2].detached, false);
+  assert.equal(calls[0][2].windowsHide, true);
+});
+
+test('Windows refuses arguments a shim would expand again', () => {
+  for (const arg of ['100%', 'a&b', 'a|b', 'a>b', 'x^', 'line\nbreak', 'bang!'])
+    assert.throws(() => launchSpec('claude', [arg], { platform: 'win32', env: winEnv, exists: p => p === shim }), { code: 'EINVAL' });
+  const settings = claudeArgs('C:\\Users\\synthetic\\AppData\\Local\\Temp\\hmp-worker-a', { platform: 'win32' });
+  assert.doesNotThrow(() => launchSpec('claude', settings, { platform: 'win32', env: winEnv, exists: p => p === shim }));
+});
+
+test('Windows stops the whole tree with taskkill', () => {
+  const calls = [];
+  killTree(42, { platform: 'win32', run: (...a) => calls.push(a.slice(0, 3)), kill: () => assert.fail('group kill on Windows') });
+  assert.deepEqual(calls, [['taskkill', ['/T', '/F', '/PID', '42'], { windowsHide: true }]]);
+  killTree(undefined, { platform: 'win32', run: () => assert.fail('no pid') });
+});
+
+test('Windows read fence uses the POSIX permission form and long names', () => {
+  const directory = 'C:\\Users\\Synthetic User\\AppData\\Local\\Temp\\hmp-worker-a';
+  assert.equal(permissionPath(directory, 'win32'), '/c/Users/Synthetic User/AppData/Local/Temp/hmp-worker-a');
+  assert.equal(permissionPath('/tmp/x', 'darwin'), '/tmp/x');
+  assert.ok(claudeArgs(directory, { platform: 'win32' }).includes('Read(//c/Users/Synthetic User/AppData/Local/Temp/hmp-worker-a/**)'));
+  const long = p => p.replace(/SYNTHE~1/i, 'Synthetic User').replaceAll('/', '\\');
+  const realpath = Object.assign(() => assert.fail('JS realpath keeps short names'), { native: long });
+  assert.equal(canonicalDirectory('C:\\Users\\SYNTHE~1\\AppData\\Local\\Temp\\hmp-worker-a', { platform: 'win32', realpath }), directory);
+  const fs = { realpath, lstat: () => ({ isFile: () => true }) };
+  const opts = { platform: 'win32', ...fs };
+  assert.equal(insideDirectory(directory, directory + '\\claim.json', opts), true);
+  assert.equal(insideDirectory(directory, 'C:\\Users\\SYNTHE~1\\AppData\\Local\\Temp\\hmp-worker-a\\claim.json', opts), true);
+  assert.equal(insideDirectory(directory, 'c:/users/synthetic user/appdata/local/temp/hmp-worker-a/claim.json', opts), true);
+  assert.equal(insideDirectory(directory, '/c/Users/Synthetic User/AppData/Local/Temp/hmp-worker-a/claim.json', opts), true);
+  assert.equal(insideDirectory(directory, directory + '\\..\\other.json', opts), false);
+  assert.equal(insideDirectory(directory, directory + '-b\\claim.json', opts), false);
+  assert.equal(insideDirectory(directory, 'C:\\Users\\Synthetic User\\.claude\\credentials.json', opts), false);
+  assert.equal(insideDirectory(directory, 'claim.json', opts), false);
+  const guard = createStreamGuard(directory, EXTRACTION_TOOLS[0], { platform: 'win32', fs });
+  const read = file_path => guard({ type: 'assistant', message: { content: [{ type: 'tool_use', id: file_path, name: 'Read', input: { file_path } }] } });
+  assert.doesNotThrow(() => read(directory + '\\claim.json'));
+  assert.throws(() => read('C:\\Windows\\win.ini'), /forbidden_read/);
+});
