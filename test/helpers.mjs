@@ -61,6 +61,10 @@ export async function fixture(t, { remote = {}, fail = false, noToken = false, c
     if (url === '/api/client/config') return { status: 200, body: JSON.stringify(state.remote) };
     if (url === '/api/client/events' && state.eventsPaused) return { status: 503, body: JSON.stringify({ error: 'client_source_paused' }) };
     if (url === '/api/client/points') return { status: state.pointsFail ? 503 : 200, body: JSON.stringify(state.pointsReceipt) };
+    if (url === '/api/client/lines/claim') return { status: state.linesClaimStatus ?? 200,
+      body: JSON.stringify({ item: state.lineItems?.shift() ?? null }) };
+    if (url === '/api/client/lines/submit') return { status: state.linesSubmitStatus ?? 200,
+      body: JSON.stringify(state.linesReceipt ?? { status: 'accepted', blocks: [] }) };
     let accepted = 0, duplicates = 0;
     for (const event of JSON.parse(raw).events) {
       if (seen.has(event.client_event_id)) duplicates++; else { seen.add(event.client_event_id); accepted++; }

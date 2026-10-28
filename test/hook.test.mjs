@@ -19,7 +19,7 @@ test('prompt/Stop send only question/final answer, with stable ids and version',
   quiet(await f.hook('Stop', { tool_output: 'SYNTHETIC_TOOL' }));
   assert.deepEqual(f.requests.map(r => r.url), ['/api/client/config', '/api/client/events', '/api/client/events']);
   const [prompt, response] = f.requests.filter(r => r.method === 'POST').map(r => r.body);
-  assert.equal(prompt.client_version, '0.2.0'); assert.equal(prompt.device, 'synthetic-device');
+  assert.equal(prompt.client_version, '0.3.0'); assert.equal(prompt.device, 'synthetic-device');
   assert.equal(prompt.events[0].kind, 'prompt'); assert.equal(prompt.events[0].text, '合成の質問');
   assert.equal(response.events[0].kind, 'response'); assert.equal(response.events[0].text, '合成の最終回答');
   assert.equal(prompt.events[0].session, 'synthetic-session');

@@ -12,7 +12,7 @@ export async function request(config, token, path, { body, deadline = Date.now()
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-HMP-Client-Version': CLIENT_VERSION },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
-    if (!response.ok && response.status !== 503) throw Error('http_error');
+    if (!response.ok && response.status !== 503) throw Object.assign(Error('http_error'), { status: response.status });
     let text = '', bytes = 0;
     const decoder = new TextDecoder();
     for await (const chunk of response.body) {
@@ -25,7 +25,7 @@ export async function request(config, token, path, { body, deadline = Date.now()
       let sourcePaused = false;
       try { sourcePaused = JSON.parse(text)?.error === 'client_source_paused'; } catch {}
       if (sourcePaused) throw Object.assign(Error('client_source_paused'), { status: 503 });
-      throw Error('http_error');
+      throw Object.assign(Error('http_error'), { status: response.status });
     }
     return JSON.parse(text);
   } finally { clearTimeout(timer); }
@@ -41,6 +41,12 @@ export function serverSummary(value) {
     limits, paused: value?.paused === true || (Array.isArray(value?.paused_sources) && value.paused_sources.includes('claude_code_hook')),
     notice: Boolean(value?.notice),
     ...(typeof value?.instance_origin === 'string' ? { instance_origin: value.instance_origin } : {}),
+    ...(value?.lines && typeof value.lines === 'object' ? { lines: {
+      contract_version: value.lines.contract_version, instructions: value.lines.instructions, output_schema: value.lines.output_schema,
+      limits: value.lines.limits && typeof value.lines.limits === 'object' ? Object.fromEntries(
+        ['max_claims_per_run', 'max_claims_per_turn', 'max_launches_per_day', 'max_seconds_per_turn']
+          .filter(k => k in value.lines.limits).map(k => [k, value.lines.limits[k]])) : {},
+    } } : {}),
     ...(value?.points && typeof value.points === 'object' ? { points: {
       backlog: count(value.points.backlog), contract_version: value.points.contract_version, instructions: value.points.instructions,
       output_schema: value.points.output_schema,
