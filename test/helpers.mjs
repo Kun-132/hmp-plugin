@@ -1,9 +1,33 @@
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, lstat } from 'node:fs/promises';
+import assert from 'node:assert/strict';
+import { after } from 'node:test';
+import { tmpdir, homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
+
+const realCodexState = join(homedir(), '.hmp', 'codex-state');
+const stateMetadata = async () => {
+  try {
+    const { mtimeNs, ctimeNs, mode, ino, dev } = await lstat(realCodexState, { bigint: true });
+    return { mtimeNs, ctimeNs, mode, ino, dev };
+  } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+};
+const originalCodexState = await stateMetadata();
+after(async () => assert.deepEqual(await stateMetadata(), originalCodexState,
+  'tests must not create or modify the real ~/.hmp/codex-state'));
+
+export async function withTestEnv(env, run) {
+  const previous = { ...process.env };
+  for (const key of Object.keys(process.env)) delete process.env[key];
+  Object.assign(process.env, env, { USERPROFILE: env.HOME });
+  try { return await run(); }
+  finally {
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    Object.assign(process.env, previous);
+  }
+}
 
 export const scripts = resolve('plugins/hmp/scripts');
 export const workerInit = { type: 'system', subtype: 'init', mcp_servers: [{ name: 'hmp', status: 'connected' }],

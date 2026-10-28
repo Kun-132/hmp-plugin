@@ -59,7 +59,7 @@ prompt_id が無い同一セッションの同じ本文・kind は同一イベ�
 
 `/hmp:status` の `points_stats.last_24h/all` は端末の経路、`points_stats.mcp.last_24h/all` は成功した MCP の段の統計です。経路ごとに直近24時間・保持中の全件の件数、処理時間・未キャッシュ入力・キャッシュ書き込み・読み込み・入力合計・出力 tokens の中央値を表示します。端末の経路はターン終了から受理までの秒数の中央値・p90（nearest-rank）と書かれた要点数の中央値も表示します。`~/.hmp/points-stats.json` は accepted のローカル抽出と `path: "mcp"` の数値を合わせて origin ごとに最新500件、`~/.hmp/backlog-history.json` は status で取り直した pending.extraction・points.backlog と時刻を最新200件持ち、`backlog_history.first/latest` で待ちの減り方を見られます。どちらも0600で本文・ID・session は保存しません。
 
-MCP の段は `~/.hmp/mcp-tools.json`（origin ごとの道具名だけ、0600）を使い、その段の2つ以外の HMP の道具を `--disallowedTools` で外します。一覧がない初回は同じ接続設定で起動して `system/init` を受けた時点で停止し、名前を保存してから本番を起動します。本番の init に余分な HMP の道具が見えた場合も停止して一覧を足し、1回だけ起動し直します。それでも残る場合は `mcp_tools_unexpected` で失敗します。`points` のない HMP の処理役は従来どおりです。
+Claude の MCP の段は `~/.hmp/mcp-tools.json`（origin ごとの道具名だけ、0600）を使い、その段の2つ以外の HMP の道具を `--disallowedTools` で外します。一覧がない初回は同じ接続設定で起動して `system/init` を受けた時点で停止し、名前を保存してから本番を起動します。本番の init に余分な HMP の道具が見えた場合も停止して一覧を足し、1回だけ起動し直します。それでも残る場合は `mcp_tools_unexpected` で失敗します。`points` のない HMP の処理役は従来どおりです。
 
 設計 §18.1 に従い、スキル本文は入口だけに保ち、抽出の手順・出力契約は HMP の claim が返す instructions に寄せます。能力と最大値はサーバーから変更できません。
 
@@ -100,13 +100,17 @@ claude --strict-mcp-config --mcp-config "$HOME/.hmp/mcp.json" \
 
 処理役は共通の `worker.lock` で端末に1つだけです。先に spool を送信し、送信済みの印から各部分の capture ID を引きます。足りないターンは待ちに残して次へ進みます。文は HMP の `sourceSpans` と同じ規則（`。！？!?`・改行、空白または末尾が続く `.`、900 UTF-16 単位、空白だけを除外）で分割し、部分名と全体の通し番号を付けます。
 
-p0 の端末だけの任意設定: `node "${CLAUDE_PLUGIN_ROOT}/scripts/manage.mjs" engine codex` で端末の1ターン要点処理を Codex に切り替えます（既定は Claude、戻すときは `engine claude` または記録された restore）。配布 instructions・Schema・検査・送信は共通で、閉じた `codex exec` を使い、一時ファイルは処理後に削除確認します。MCP の待ち処理・線と p1〜p3 は Claude のままです。status / verify は現在の engine、status は engine 別の中央値も表示します。
+p0 の端末だけの任意設定: `node "${CLAUDE_PLUGIN_ROOT}/scripts/manage.mjs" engine codex` で端末の1ターン要点処理と MCP の待ち処理・線を Codex に切り替えます（既定は Claude、戻すときは `engine claude` または記録された restore）。配布 instructions・Schema・検査・送信は共通で、閉じた `codex exec` を使い、一時ファイルは処理後に削除確認します。p1〜p3 は Claude のままです。status / verify は現在の engine、status は端末・MCP それぞれで engine 別の中央値も表示します。
+
+Codex の MCP は同じ system prompt と claim・submit の指示を標準入力に渡し、config の instance_url + `/mcp` を必須接続として各段の2ツールだけを有効にします。`mcp.json` や Claude の起動確認は使わず、`codex --version` を確認します。JSONL で他のツール・2回目の claim・4回目の submit を検知すると停止し、正常終了でも claim が0回なら `mcp_tools_missing` を記録します。
+
+p0 の端末を `engine codex` に切り替えるときは、`codex mcp login hmp` を一度実行してください。切り替え後の verify は Codex の HMP MCP 接続を `worker.mcp` に表示します。point・line の4ツールを有効にして接続だけ確認し、ツールを呼ばず正常に完了した場合だけ `worker.mcp`・`worker.lines` が true になります。
 
 子の起動は `claude -p --model sonnet --tools "" --strict-mcp-config --setting-sources "" --settings '{"disableAllHooks":true,"enabledPlugins":{}}' --no-session-persistence --output-format json --json-schema <output_schema>`。スキル・Chrome も無効にし、固定の system prompt で境界を保ち、抽出基準としての配布 instructions と、信頼できないデータとして囲った番号付きの文だけを標準入力に渡します。ツール・MCP 接続は与えません。子の環境は既存の `claudeEnv()` の許可リストだけで、`ANTHROPIC_API_KEY`・端末トークン・provider の設定は渡しません。
 
 構造化出力を配布 schema と要点の形で検査し、端末トークンで `/api/client/points` に送ります。model は Claude なら `sonnet`、Codex なら `codex`、usage は入力・出力 tokens（CLI が返した場合）、実測の duration_ms、UTC ミリ秒の turn_ended_at です。`accepted` / `already_done` だけで待ちを消します。失敗時は固定コードに加えて、本文なしの試行回数・次回時刻を `turn-retries/` に記録します。5分・30分・2時間・6時間・以後1日の間隔をあけ、待機中のターンを飛ばして後続を処理します。原文の送信済みの印とターンは残し、7日を過ぎたターンは端末の待ちから外して `turn_expired` を記録します。原文と未処理の待ちは HMP 側に残ります。モデルの出力・標準エラーは保存しません。
 
-上限は **UTC 1日300件・1回10件・1件90秒**と `points.limits` の小さい方です。0は停止、不正値も0。試行前に `points-usage.json` に数え、失敗でも返却しません。日付が変われば再開します。すぐ処理できる端末の待ちを処理した後、同じ処理役で `/api/client/config` を取り直し、MCP 設定の検査が通り、`points.backlog` または `pending.lines` が1以上なら、`claim_turn` / `submit_points` を先に、その後 `claim_line_job` / `submit_line_blocks` を処理します。この起動も同じ件数・日次・時間の枠を使い、各段の2ツールだけを許して stream を監視します。Read は許しません。config を取り直せないときは MCP を起動しません。HMP の `claim_turn` は30分以上前の記録だけが対象です。空の claim（submit 0回）が出た段は、その処理役では再起動しません。MCP の失敗や OAuth 切れは端末のターン処理を止めません。処理中も待ちを取り直し、解除後の到着には残り予算で1回だけ再起動します。各ターンの実行役の起動前と要点送信前に一時停止・そのセッションのオフレコを再確認します。一時停止では待ちを残し、オフレコではそのセッションの待ちを捨てます。ここでは Hook が確認済みの `.hmp-ignore` を再判定しません。常駐はしません。
+上限は **UTC 1日300件・1回10件・1件90秒**と `points.limits` の小さい方です。0は停止、不正値も0。試行前に `points-usage.json` に数え、失敗でも返却しません。日付が変われば再開します。すぐ処理できる端末の待ちを処理した後、同じ処理役で `/api/client/config` を取り直し、選んだ engine の MCP 起動前の検査が通り、`points.backlog` または `pending.lines` が1以上なら、`claim_turn` / `submit_points` を先に、その後 `claim_line_job` / `submit_line_blocks` を処理します。この起動も同じ件数・日次・時間の枠を使い、各段の2ツールだけを許して stream を監視します。Read は許しません。config を取り直せないときは MCP を起動しません。HMP の `claim_turn` は30分以上前の記録だけが対象です。空の claim（submit 0回）が出た段は、その処理役では再起動しません。MCP の失敗や OAuth 切れは端末のターン処理を止めません。処理中も待ちを取り直し、解除後の到着には残り予算で1回だけ再起動します。各ターンの実行役の起動前と要点送信前に一時停止・そのセッションのオフレコを再確認します。一時停止では待ちを残し、オフレコではそのセッションの待ちを捨てます。ここでは Hook が確認済みの `.hmp-ignore` を再判定しません。常駐はしません。
 
 ## 設定変更と戻し方
 

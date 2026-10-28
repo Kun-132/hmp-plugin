@@ -121,7 +121,7 @@ test('MCP numeric rows keep terminal medians separate and use completion time fo
   assert.deepEqual(saved[config.instance_url][0], terminal);
   assert.deepEqual(saved[other.instance_url], [oldMcp]);
   assert.ok(saved[config.instance_url].slice(1).every(row => row.path === 'mcp'
-    && Object.entries(row).every(([key, n]) => key === 'path' || typeof n === 'number')));
+    && Object.entries(row).every(([key, n]) => key === 'path' || key === 'engine' || typeof n === 'number')));
   assert.ok(!raw.includes('SYNTHETIC_')); assert.equal((await stat(file)).mode & 0o777, 0o600);
   const stats = await pointsStats(config, now);
   assert.equal(stats.all.count, 1); assert.equal(stats.all.input_total_tokens_median, 302);
@@ -162,4 +162,24 @@ test('status samples fresh config only, shows current-origin stats and retains h
   const offline = await status();
   assert.equal(offline.pending, null); assert.deepEqual(offline.backlog_history, second.backlog_history);
   assert.equal((await f.read('backlog-history.json'))[f.url].length, 2);
+});
+
+test('MCP engine rows and summaries retain Claude legacy data and discard unknown engines', async t => {
+  await localHome(t);
+  const now = 3 * 86400_000;
+  const mcp = (at, duration_ms, engine) => ({ path: 'mcp', at, duration_ms, ...(engine ? { engine } : {}) });
+  await writeJSON(pathFor('points-stats.json'), { [config.instance_url]: [
+    mcp(now, 10), mcp(now - 86400_001, 30, 'claude'), mcp(now, 999, 'SYNTHETIC_PRIVATE'),
+  ] });
+  await recordMcpStats({ ...config, engine: 'codex' }, { duration_ms: 100, input_tokens: 2 }, now);
+  await recordMcpStats(config, { duration_ms: 20, input_tokens: 4 }, now);
+  const rows = JSON.parse(await readFile(pathFor('points-stats.json'), 'utf8'))[config.instance_url];
+  assert.equal(rows.length, 4); assert.equal(rows[2].engine, 'codex'); assert.equal(rows[3].engine, 'claude');
+  const stats = (await pointsStats(config, now)).mcp;
+  assert.equal(stats.all.count, 4); assert.equal(stats.last_24h.count, 3);
+  assert.equal(stats.by_engine.claude.all.count, 3); assert.equal(stats.by_engine.claude.last_24h.count, 2);
+  assert.equal(stats.by_engine.claude.all.duration_ms_median, 20);
+  assert.equal(stats.by_engine.codex.all.count, 1); assert.equal(stats.by_engine.codex.last_24h.input_tokens_median, 2);
+  assert.equal((await pointsStats(other, now)).mcp.by_engine.codex.all.count, 0);
+  assert.ok(!JSON.stringify(stats).includes('SYNTHETIC_PRIVATE'));
 });

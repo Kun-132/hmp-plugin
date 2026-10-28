@@ -2,10 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, writeFile, stat, rm, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fixture, mcpEvents } from './helpers.mjs';
+import { homedir } from 'node:os';
+import { fixture, withTestEnv } from './helpers.mjs';
 import { validateConfig } from '../plugins/hmp/scripts/config.mjs';
 import { pointsCodexArgs, runPointsCodex, runPointsClaude } from '../plugins/hmp/scripts/points-worker.mjs';
-import { POINT_TOOLS, LINE_TOOLS } from '../plugins/hmp/scripts/worker.mjs';
 
 const point = { kind: 'decision', speaker: 'user', text: '合成の判断', evidence: [1] };
 const schema = { type: 'object', additionalProperties: false, required: ['points'], properties: {
@@ -56,10 +56,9 @@ async function seed(t) {
   return f;
 }
 async function direct(f, body = fake, timeout = 1000) {
-  const executable = await binary(f, body), previous = process.env;
-  process.env = { ...f.env, USER: 'synthetic', LOGNAME: 'synthetic', CODEX_HOME: join(f.home, '.codex') };
-  try { return await runPointsCodex(contract, [{ n: 1, part: 'prompt', text: '合成。' }], timeout, { binary: executable, tempRoot: f.home }); }
-  finally { process.env = previous; }
+  const executable = await binary(f, body);
+  return withTestEnv({ ...f.env, USER: 'synthetic', LOGNAME: 'synthetic', CODEX_HOME: join(f.home, '.codex') },
+    () => runPointsCodex(contract, [{ n: 1, part: 'prompt', text: '合成。' }], timeout, { binary: executable, tempRoot: f.home }));
 }
 async function cleaned(f) {
   for (const launch of await launches(f)) await assert.rejects(stat(launch.cwd), { code: 'ENOENT' });
@@ -67,6 +66,16 @@ async function cleaned(f) {
   for (const directory of directories) await assert.rejects(stat(directory), { code: 'ENOENT' });
   assert.deepEqual((await readdir(f.home)).filter(n => n.startsWith('hmp-points-codex-')), []);
 }
+
+test('synthetic HOME changes native homedir and restores HOME and USERPROFILE after a failure', async t => {
+  const f = await fixture(t), home = process.env.HOME, userProfile = process.env.USERPROFILE;
+  await assert.rejects(withTestEnv(f.env, async () => {
+    assert.equal(homedir(), f.home);
+    assert.equal(process.env.HOME, f.home); assert.equal(process.env.USERPROFILE, f.home);
+    throw Error('synthetic_failure');
+  }), /synthetic_failure/);
+  assert.equal(process.env.HOME, home); assert.equal(process.env.USERPROFILE, userProfile);
+});
 
 test('engine is a fixed optional enum; changes record backup, diff, restore and readback, and setup preserves it', async t => {
   const f = await fixture(t), before = await f.read('config.json');
@@ -87,6 +96,7 @@ test('engine is a fixed optional enum; changes record backup, diff, restore and 
   assert.deepEqual(record.diff, [{ file: 'config.json', before, after: { ...before, engine: 'codex' } }]);
   assert.deepEqual(await f.read('mcp.json'), mcp);
   assert.equal(ok(await f.run('manage.mjs', ['status'])).engine, 'codex');
+  await binary(f, `process.stdout.write('{"type":"turn.completed"}');`);
   assert.equal(ok(await f.run('manage.mjs', ['verify'])).engine, 'codex');
   ok(await f.run('manage.mjs', ['setup', f.url, before.device]));
   assert.deepEqual(await f.read('config.json'), { ...before, engine: 'codex' });
@@ -100,20 +110,24 @@ test('engine is a fixed optional enum; changes record backup, diff, restore and 
   assert.equal((await f.read('config.json')).engine, 'claude');
 });
 
-test('Codex args exactly close configuration, tools, plugins, hooks and persistence', () => {
-  const dir = '/tmp/synthetic directory';
-  assert.deepEqual(pointsCodexArgs(dir), [
-    '--no-daemon', '--strict-config', 'exec', '--ignore-user-config', '--ignore-rules', '--ephemeral',
-    '--sandbox', 'read-only', '--skip-git-repo-check', '--cd', dir, '--json',
-    '--output-last-message', join(dir, 'out.json'), '--output-schema', join(dir, 'output-schema.json'),
-    '-c', 'approval_policy="never"', '-c', 'web_search="disabled"', '-c', 'mcp_servers={}', '-c', 'history.persistence="none"',
-    '-c', `log_dir=${JSON.stringify(join(dir, 'logs'))}`, '-c', `sqlite_home=${JSON.stringify(join(dir, 'state'))}`,
-    '-c', 'analytics.enabled=false', '-c', 'feedback.enabled=false',
-    '--disable', 'view_image', '--disable', 'shell_tool', '--disable', 'unified_exec', '--disable', 'shell_snapshot',
-    '--disable', 'apps', '--disable', 'plugins', '--disable', 'remote_plugin', '--disable', 'hooks', '--disable', 'multi_agent',
-    '--disable', 'memories', '--disable', 'goals', '--disable', 'browser_use', '--disable', 'computer_use',
-    '--disable', 'image_generation', '--disable', 'code_mode', '--disable', 'standalone_web_search', '-',
-  ]);
+test('Codex args exactly close configuration, tools, plugins, hooks and persistence', async t => {
+  const f = await fixture(t);
+  await withTestEnv(f.env, () => {
+    const dir = '/tmp/synthetic directory';
+    assert.deepEqual(pointsCodexArgs(dir), [
+      '--no-daemon', '--strict-config', 'exec', '--ignore-user-config', '--ignore-rules', '--ephemeral',
+      '--sandbox', 'read-only', '--skip-git-repo-check', '--cd', dir, '--json',
+      '--output-last-message', join(dir, 'out.json'), '--output-schema', join(dir, 'output-schema.json'),
+      '-c', 'approval_policy="never"', '-c', 'web_search="disabled"', '-c', 'tool_output_token_limit=100000',
+      '-c', 'mcp_servers={}', '-c', 'history.persistence="none"',
+      '-c', `log_dir=${JSON.stringify(join(dir, 'logs'))}`, '-c', `sqlite_home=${JSON.stringify(join(f.home, '.hmp', 'codex-state'))}`,
+      '-c', 'analytics.enabled=false', '-c', 'feedback.enabled=false',
+      '--disable', 'view_image', '--disable', 'shell_tool', '--disable', 'unified_exec', '--disable', 'shell_snapshot',
+      '--disable', 'apps', '--disable', 'plugins', '--disable', 'remote_plugin', '--disable', 'hooks', '--disable', 'multi_agent',
+      '--disable', 'memories', '--disable', 'goals', '--disable', 'browser_use', '--disable', 'computer_use',
+      '--disable', 'image_generation', '--disable', 'code_mode', '--disable', 'standalone_web_search', '-',
+    ]);
+  });
 });
 
 test('Codex terminal path sends the same contract, validated output and numeric usage with isolated env and private cleanup', async t => {
@@ -130,7 +144,9 @@ const original = cp.spawn; cp.spawn = (file, args, options) => {
   f.env.NODE_OPTIONS += ' --import=' + capture;
   ok(await f.run('worker.mjs'));
   const [launch] = await launches(f);
-  assert.deepEqual(launch.args, pointsCodexArgs(launch.cwd));
+  await withTestEnv(f.env, () => assert.deepEqual(launch.args, pointsCodexArgs(launch.cwd)));
+  const state = await stat(join(f.home, '.hmp', 'codex-state'));
+  assert.ok(state.isDirectory()); assert.equal(state.mode & 0o777, 0o700);
   const spawnEnv = JSON.parse(await readFile(join(f.home, 'spawn-env.json'), 'utf8'));
   assert.deepEqual(Object.keys(spawnEnv).sort(), ['PATH', 'HOME', 'USER', 'LOGNAME', 'CODEX_HOME', 'TMPDIR'].sort());
   assert.ok(!JSON.stringify(spawnEnv).includes('SYNTHETIC_FORBIDDEN'));
@@ -164,9 +180,7 @@ process.stdin.on('data', c => input += c); process.stdin.on('end', () => {
 fs.writeFileSync(process.env.HOME + '/claude-input', input);
 process.stdout.write(${JSON.stringify(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: output }))}); });` });
   await direct(f);
-  const previous = process.env; process.env = f.env;
-  try { await runPointsClaude(f.project, contract, [{ n: 1, part: 'prompt', text: '合成。' }], 1000, { binary: join(f.bin, 'claude') }); }
-  finally { process.env = previous; }
+  await withTestEnv(f.env, () => runPointsClaude(f.project, contract, [{ n: 1, part: 'prompt', text: '合成。' }], 1000, { binary: join(f.bin, 'claude') }));
   const normalize = value => value.replaceAll(/UNTRUSTED_TURN_[a-f0-9-]+/g, 'UNTRUSTED_TURN_BOUNDARY');
   assert.equal(normalize(await readFile(join(f.home, 'codex-input'), 'utf8')), normalize(await readFile(join(f.home, 'claude-input'), 'utf8')));
 });
@@ -235,7 +249,7 @@ test('non-executable Codex is unavailable and does not change the parent umask',
   const f = await fixture(t), path = join(f.bin, 'not-executable');
   await writeFile(path, 'synthetic', { mode: 0o600 });
   const mask = process.umask();
-  assert.deepEqual(await runPointsCodex(contract, [], 1000, { binary: path, tempRoot: f.home }), { code: 'codex_unavailable' });
+  assert.deepEqual(await withTestEnv(f.env, () => runPointsCodex(contract, [], 1000, { binary: path, tempRoot: f.home })), { code: 'codex_unavailable' });
   assert.equal(process.umask(), mask); await cleaned(f);
 });
 
@@ -278,20 +292,3 @@ for (const mode of ['pause', 'offrecord']) {
     await cleaned(f);
   });
 }
-
-test('Codex engine leaves MCP backlog and line work on Claude', async t => {
-  const init = { type: 'system', subtype: 'init', mcp_servers: [{ name: 'hmp', status: 'connected' }], tools: [...POINT_TOOLS, ...LINE_TOOLS] };
-  const f = await fixture(t, { remote: { points: { ...contract, backlog: 1 }, pending: { lines: 1 } },
-    claude: `const fs = require('node:fs'); fs.appendFileSync(process.env.HOME + '/mcp-launches', JSON.stringify(process.argv.slice(2)) + '\\n');
-${mcpEvents([init, { type: 'result', subtype: 'success', is_error: false }])}` });
-  ok(await f.run('manage.mjs', ['engine', 'codex'])); await cached(f); await binary(f);
-  await f.write('mcp-tools.json', { [f.url]: [...POINT_TOOLS, ...LINE_TOOLS] });
-  ok(await f.run('worker.mjs'));
-  assert.deepEqual(await launches(f), []);
-  const args = (await readFile(join(f.home, 'mcp-launches'), 'utf8')).trim().split('\n').map(JSON.parse);
-  assert.equal(args.length, 2);
-  for (const [i, tools] of [POINT_TOOLS, LINE_TOOLS].entries()) {
-    const start = args[i].indexOf('--allowedTools') + 1;
-    assert.deepEqual(args[i].slice(start, args[i].findIndex((arg, index) => index >= start && arg.startsWith('--'))), tools);
-  }
-});

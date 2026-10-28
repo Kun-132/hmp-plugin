@@ -12,15 +12,14 @@ function reasonCounts(value) {
     && code.length <= 64 && count(n)));
 }
 function pointRow(value) {
-  if (value?.path === 'mcp') {
-    const row = numericRow(value, ['at', 'duration_ms'], tokenFields);
-    return row ? { path: 'mcp', ...row } : null;
-  }
-  const row = numericRow(value, ['accepted_at', 'turn_to_accepted_ms', 'duration_ms', 'written', 'dropped'], tokenFields);
+  const mcp = value?.path === 'mcp';
+  const row = numericRow(value, mcp ? ['at', 'duration_ms']
+    : ['accepted_at', 'turn_to_accepted_ms', 'duration_ms', 'written', 'dropped'], tokenFields);
   if (value && Object.hasOwn(value, 'engine')) {
     if (!['claude', 'codex'].includes(value.engine)) return null;
     if (row) row.engine = value.engine;
   }
+  if (mcp) return row ? { path: 'mcp', ...row } : null;
   if (row && value.dropped_by_reason) row.dropped_by_reason = reasonCounts(value.dropped_by_reason);
   return row;
 }
@@ -44,7 +43,7 @@ export async function recordPointsStats(config, { accepted_at, turn_ended_at, us
   if (row) await append('points-stats.json', config.instance_url, row, pointRow, 500);
 }
 export async function recordMcpStats(config, usage, at = Date.now()) {
-  const row = pointRow({ path: 'mcp', at, duration_ms: usage?.duration_ms,
+  const row = pointRow({ path: 'mcp', engine: config.engine ?? 'claude', at, duration_ms: usage?.duration_ms,
     ...Object.fromEntries(tokenFields.map(key => [key, usage?.[key]])) });
   if (row) await append('points-stats.json', config.instance_url, row, pointRow, 500);
 }
@@ -73,9 +72,11 @@ export async function pointsStats(config, now = Date.now()) {
   const rows = (await histories('points-stats.json', pointRow, 500))[config.instance_url] ?? [];
   const terminal = rows.filter(row => row.path !== 'mcp'), mcp = rows.filter(row => row.path === 'mcp');
   const summary = values => ({ last_24h: summarize(values.filter(row => row.accepted_at >= now - 86400_000 && row.accepted_at <= now)), all: summarize(values) });
+  const mcpSummary = values => ({ last_24h: usageSummary(values.filter(row => row.at >= now - 86400_000 && row.at <= now)), all: usageSummary(values) });
   return { ...summary(terminal),
     by_engine: Object.fromEntries(['claude', 'codex'].map(engine => [engine, summary(terminal.filter(row => (row.engine ?? 'claude') === engine))])),
-    mcp: { last_24h: usageSummary(mcp.filter(row => row.at >= now - 86400_000 && row.at <= now)), all: usageSummary(mcp) } };
+    mcp: { ...mcpSummary(mcp),
+      by_engine: Object.fromEntries(['claude', 'codex'].map(engine => [engine, mcpSummary(mcp.filter(row => (row.engine ?? 'claude') === engine))])) } };
 }
 export async function recordBacklog(config, summary, at = Date.now()) {
   await append('backlog-history.json', config.instance_url,
