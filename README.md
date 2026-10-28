@@ -104,6 +104,8 @@ p0 の端末だけの任意設定: `node "${CLAUDE_PLUGIN_ROOT}/scripts/manage.m
 
 Codex の MCP は同じ system prompt と claim・submit の指示を標準入力に渡し、config の instance_url + `/mcp` を必須接続として各段の2ツールだけを有効にします。`mcp.json` や Claude の起動確認は使わず、`codex --version` を確認します。JSONL で他のツール・2回目の claim・4回目の submit を検知すると停止し、正常終了でも claim が0回なら `mcp_tools_missing` を記録します。
 
+p0 の端末を `engine codex` に切り替えるときは、`codex mcp login hmp` を一度実行してください。切り替え後の verify は Codex の HMP MCP 接続を `worker.mcp` に表示します。point・line の4ツールを有効にして接続だけ確認し、ツールを呼ばず正常に完了した場合だけ `worker.mcp`・`worker.lines` が true になります。
+
 子の起動は `claude -p --model sonnet --tools "" --strict-mcp-config --setting-sources "" --settings '{"disableAllHooks":true,"enabledPlugins":{}}' --no-session-persistence --output-format json --json-schema <output_schema>`。スキル・Chrome も無効にし、固定の system prompt で境界を保ち、抽出基準としての配布 instructions と、信頼できないデータとして囲った番号付きの文だけを標準入力に渡します。ツール・MCP 接続は与えません。子の環境は既存の `claudeEnv()` の許可リストだけで、`ANTHROPIC_API_KEY`・端末トークン・provider の設定は渡しません。
 
 構造化出力を配布 schema と要点の形で検査し、端末トークンで `/api/client/points` に送ります。model は Claude なら `sonnet`、Codex なら `codex`、usage は入力・出力 tokens（CLI が返した場合）、実測の duration_ms、UTC ミリ秒の turn_ended_at です。`accepted` / `already_done` だけで待ちを消します。失敗時は固定コードに加えて、本文なしの試行回数・次回時刻を `turn-retries/` に記録します。5分・30分・2時間・6時間・以後1日の間隔をあけ、待機中のターンを飛ばして後続を処理します。原文の送信済みの印とターンは残し、7日を過ぎたターンは端末の待ちから外して `turn_expired` を記録します。原文と未処理の待ちは HMP 側に残ります。モデルの出力・標準エラーは保存しません。

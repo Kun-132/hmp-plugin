@@ -2,10 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, writeFile, stat, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fixture, mcpEvents } from './helpers.mjs';
+import { fixture, mcpEvents, withTestEnv } from './helpers.mjs';
 import { mcpCodexArgs, runMcpCodex } from '../plugins/hmp/scripts/mcp-tools.mjs';
 import { pointsCodexArgs } from '../plugins/hmp/scripts/points-worker.mjs';
-import { claudeArgs, runClaude, POINT_TOOLS, LINE_TOOLS } from '../plugins/hmp/scripts/worker.mjs';
+import { claudeArgs, runClaude, VERIFY_PROMPT, POINT_TOOLS, LINE_TOOLS } from '../plugins/hmp/scripts/worker.mjs';
 import { MCP_FAILURE_CODES } from '../plugins/hmp/scripts/turns.mjs';
 
 const privateText = 'SYNTHETIC_PRIVATE_MODEL_OUTPUT';
@@ -31,12 +31,11 @@ require('node:fs').appendFileSync(process.env.HOME + '/codex-versions', 'v'); pr
 ${body}`, { mode: 0o700 });
   return executable;
 }
-async function direct(f, body, { stage = POINT_TOOLS, timeout = 2000, executable } = {}) {
-  const path = executable ?? await binary(f, body), previous = process.env;
-  process.env = { ...f.env, USER: 'synthetic', LOGNAME: 'synthetic', CODEX_HOME: join(f.home, '.codex'),
-    OPENAI_API_KEY: 'SYNTHETIC_FORBIDDEN', HMP_EXTRACTOR_TOKEN: 'SYNTHETIC_FORBIDDEN' };
-  try { return await runMcpCodex({ instance_url: f.url }, stage, timeout, { binary: path, tempRoot: f.home }); }
-  finally { process.env = previous; }
+async function direct(f, body, { stage = POINT_TOOLS, timeout = 2000, executable, verify = false } = {}) {
+  const path = executable ?? await binary(f, body);
+  return withTestEnv({ ...f.env, USER: 'synthetic', LOGNAME: 'synthetic', CODEX_HOME: join(f.home, '.codex'),
+    OPENAI_API_KEY: 'SYNTHETIC_FORBIDDEN', HMP_EXTRACTOR_TOKEN: 'SYNTHETIC_FORBIDDEN' },
+    () => runMcpCodex({ instance_url: f.url }, stage, timeout, { binary: path, tempRoot: f.home, verify }));
 }
 async function cleaned(f) {
   assert.deepEqual((await readdir(f.home)).filter(name => name.startsWith('hmp-mcp-codex-')), []);
@@ -44,17 +43,22 @@ async function cleaned(f) {
 const launches = async f => (await readFile(join(f.home, 'codex-launches.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
 const ok = r => { assert.equal(r.code, 0, r.stderr); assert.equal(r.stderr, ''); };
 
-test('MCP Codex args mirror the per-turn boundary, with only the stage tools and required HMP URL', () => {
-  const directory = '/tmp/synthetic directory', config = { instance_url: 'https://synthetic.example' };
-  for (const stage of [POINT_TOOLS, LINE_TOOLS]) {
-    const expected = pointsCodexArgs(directory);
-    expected.splice(expected.indexOf('--output-last-message'), 4);
-    expected.splice(expected.indexOf('mcp_servers={}'), 1,
-      'mcp_servers.hmp.url="https://synthetic.example/mcp"', '-c',
-      `mcp_servers.hmp.enabled_tools=${JSON.stringify(stage.map(tool => tool.replace(/^mcp__hmp__/, '')))}`,
-      '-c', 'mcp_servers.hmp.required=true');
-    assert.deepEqual(mcpCodexArgs(config, stage, directory), expected);
-  }
+test('MCP Codex args mirror the per-turn boundary, with only the stage tools and required HMP URL', async t => {
+  const f = await fixture(t);
+  await withTestEnv(f.env, () => {
+    const directory = '/tmp/synthetic directory', config = { instance_url: 'https://synthetic.example' };
+    for (const stage of [POINT_TOOLS, LINE_TOOLS]) {
+      const expected = pointsCodexArgs(directory);
+      expected.splice(expected.indexOf('--output-last-message'), 4);
+      expected.splice(expected.indexOf('mcp_servers={}'), 1,
+        'mcp_servers.hmp.url="https://synthetic.example/mcp"', '-c',
+        `mcp_servers.hmp.enabled_tools=${JSON.stringify(stage.map(tool => tool.replace(/^mcp__hmp__/, '')))}`,
+        '-c', 'mcp_servers.hmp.required=true');
+      const args = mcpCodexArgs(config, stage, directory);
+      assert.deepEqual(args, expected);
+      assert.ok(args.includes('tool_output_token_limit=100000'));
+    }
+  });
 });
 
 test('both MCP stages accept one claim and submit, deduplicate event phases, parse usage and clean private state', async t => {
@@ -73,7 +77,9 @@ test('both MCP stages accept one claim and submit, deduplicate event phases, par
       cache_read_input_tokens: 300, output_tokens: 45, duration_ms: 0 });
     assert.ok(result.usage.duration_ms >= 0); assert.ok(!JSON.stringify(result).includes(privateText));
     const launch = (await launches(f)).at(-1);
-    assert.deepEqual(launch.args, mcpCodexArgs({ instance_url: f.url }, stage, launch.cwd));
+    await withTestEnv(f.env, () => assert.deepEqual(launch.args, mcpCodexArgs({ instance_url: f.url }, stage, launch.cwd)));
+    const state = await stat(join(f.home, '.hmp', 'codex-state'));
+    assert.ok(state.isDirectory()); assert.equal(state.mode & 0o777, 0o700);
     assert.equal(launch.mode, 0o700); assert.equal(launch.mask, 0o077); assert.equal(launch.env.TMPDIR, launch.cwd);
     assert.ok(!JSON.stringify(launch.env).includes('SYNTHETIC_FORBIDDEN'));
     assert.equal(launch.env.CODEX_HOME, join(f.home, '.codex'));
@@ -86,12 +92,64 @@ test('MCP Codex stdin is the Claude system prompt followed by exactly the same c
 process.stdin.on('end', () => { require('node:fs').writeFileSync(process.env.HOME + '/claude-input', input); });` });
   for (const stage of [POINT_TOOLS, LINE_TOOLS]) {
     await direct(f, fake(success(stage)), { stage });
-    const previous = process.env; process.env = f.env;
-    try { await runClaude(f.project, stage[0], 2000, { binary: join(f.bin, 'claude'), mcpOnly: true }); }
-    finally { process.env = previous; }
+    await withTestEnv(f.env, () => runClaude(f.project, stage[0], 2000, { binary: join(f.bin, 'claude'), mcpOnly: true }));
     const args = claudeArgs(f.project, { claimTool: stage[0], mcpOnly: true });
     assert.equal(await readFile(join(f.home, 'codex-input'), 'utf8'),
       args[args.indexOf('--system-prompt') + 1] + '\n' + await readFile(join(f.home, 'claude-input'), 'utf8'));
+  }
+});
+
+test('Codex verify uses the stage args with all four tools, the exact no-tool prompt and no Claude configuration', async t => {
+  const f = await fixture(t, { remote: { points: {} }, claude: 'process.exit(1);' });
+  await f.write('config.json', { ...await f.read('config.json'), engine: 'codex' });
+  await rm(join(f.home, '.hmp/mcp.json'));
+  await binary(f, fake([
+    { type: 'thread.started', thread_id: 'synthetic' }, { type: 'turn.started' },
+    { type: 'item.completed', item: { type: 'reasoning', text: privateText } },
+    { type: 'item.completed', item: { type: 'agent_message', text: 'OK' } }, done,
+  ]));
+  const result = await f.run('manage.mjs', ['verify']); ok(result);
+  assert.deepEqual(JSON.parse(result.stdout).worker,
+    { ready: true, mcp: true, lines: true, server: 'hmp', url: f.url + '/mcp' });
+  const [launch] = await launches(f);
+  await withTestEnv(f.env, () => assert.deepEqual(launch.args,
+    mcpCodexArgs({ instance_url: f.url }, [...POINT_TOOLS, ...LINE_TOOLS], launch.cwd)));
+  assert.equal((await launches(f)).length, 1);
+  assert.equal(await readFile(join(f.home, 'codex-input'), 'utf8'), VERIFY_PROMPT);
+  await assert.rejects(stat(launch.cwd), { code: 'ENOENT' });
+  await assert.rejects(stat(join(f.home, '.hmp/points-stats.json')), { code: 'ENOENT' });
+});
+
+test('Codex verify never reports MCP or lines ready on initialization, turn, stream, exit or spawn failures', async t => {
+  const f = await fixture(t, { remote: { points: {} } });
+  await f.write('config.json', { ...await f.read('config.json'), engine: 'codex' });
+  for (const body of [
+    `process.stderr.write('required MCP servers failed to initialize: hmp: AuthRequired'); process.exit(1);`,
+    emit([{ type: 'turn.started' }]), emit([done]) + 'process.exit(1);',
+    emit([{ type: 'turn.failed' }]), emit([{ type: 'error', message: privateText }]),
+    "process.stdout.write('not JSON');", emit([call(POINT_TOOLS[0]), done]),
+    emit([{ type: 'item.started', item: { type: 'command_execution' } }, done]),
+  ]) {
+    await binary(f, body);
+    const result = await f.run('manage.mjs', ['verify']); ok(result);
+    assert.deepEqual(JSON.parse(result.stdout).worker,
+      { ready: false, mcp: false, lines: false, server: 'hmp', url: f.url + '/mcp' });
+    assert.ok(!result.stdout.includes(privateText));
+  }
+  await rm(join(f.bin, 'codex'));
+  const result = await f.run('manage.mjs', ['verify']); ok(result);
+  assert.equal(JSON.parse(result.stdout).worker.mcp, false);
+  assert.equal(JSON.parse(result.stdout).worker.lines, false);
+});
+
+test('Codex verify rejects every tool item at every event phase as verification_tool_call', async t => {
+  const f = await fixture(t);
+  for (const type of ['mcp_tool_call', 'command_execution', 'file_change', 'web_search', 'collab_tool_call', 'todo_list', 'unknown']) {
+    for (const phase of ['item.started', 'item.updated', 'item.completed']) {
+      const result = await direct(f, fake([{ type: phase, item: { type } }, done]), { verify: true });
+      assert.equal(result.status, 'failed'); assert.equal(result.reason, 'verification_tool_call');
+      assert.equal(result.lines, false); assert.equal(result.submits, 0); await cleaned(f);
+    }
   }
 });
 

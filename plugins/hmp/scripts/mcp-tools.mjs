@@ -5,7 +5,7 @@ import { mkdtemp, chmod, rm, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { codexExecArgs, codexEnv, codexUsage, ensureCodexState } from './codex-exec.mjs';
-import { runClaude, MCP_SYSTEM_PROMPT, mcpPrompt } from './worker.mjs';
+import { runClaude, MCP_SYSTEM_PROMPT, VERIFY_PROMPT, mcpPrompt } from './worker.mjs';
 
 export function mcpCodexArgs(config, stageTools, directory) {
   return codexExecArgs(directory, { mcpConfig: [
@@ -14,7 +14,7 @@ export function mcpCodexArgs(config, stageTools, directory) {
     'mcp_servers.hmp.required=true',
   ] });
 }
-export async function runMcpCodex(config, stageTools, timeoutMs, { binary = 'codex', tempRoot = tmpdir() } = {}) {
+export async function runMcpCodex(config, stageTools, timeoutMs, { binary = 'codex', tempRoot = tmpdir(), verify = false } = {}) {
   const started = Date.now();
   const failed = reason => ({ status: 'failed', reason, lines: false, submits: 0 });
   let directory;
@@ -46,6 +46,9 @@ export async function runMcpCodex(config, stageTools, timeoutMs, { binary = 'cod
           if (event.type === 'turn.failed' || event.type === 'error') { stop('result_failed'); return; }
           if (['item.started', 'item.updated', 'item.completed'].includes(event.type)) {
             const item = event.item;
+            if (verify && !['agent_message', 'reasoning', 'error'].includes(item?.type)) {
+              stop('verification_tool_call'); return;
+            }
             if (!['agent_message', 'reasoning', 'error', 'mcp_tool_call'].includes(item?.type)) { stop('forbidden_tool'); return; }
             if (item.type === 'mcp_tool_call') {
               if (item.server !== 'hmp' || ![claim, submit].includes(item.tool)) { stop('forbidden_tool'); return; }
@@ -84,12 +87,12 @@ export async function runMcpCodex(config, stageTools, timeoutMs, { binary = 'cod
       child.on('close', code => {
         consume(pending); clearTimeout(timer);
         process.removeListener('SIGTERM', interrupt); process.removeListener('SIGINT', interrupt);
-        reason ??= code !== 0 ? 'exit_failed' : !completed ? 'result_missing' : claims === 0 ? 'tools_missing' : undefined;
+        reason ??= code !== 0 ? 'exit_failed' : !completed ? 'result_missing' : !verify && claims === 0 ? 'tools_missing' : undefined;
         resolve({ status: reason === 'tools_missing' ? 'stage_unavailable' : reason ? 'failed' : 'ok',
-          ...(reason ? { reason } : {}), lines: false, submits,
+          ...(reason ? { reason } : {}), lines: verify && !reason, submits,
           ...(!reason ? { usage: { ...usage, duration_ms: Date.now() - started } } : {}) });
       });
-      child.stdin.end(`${MCP_SYSTEM_PROMPT}\n${mcpPrompt(stageTools[0])}`);
+      child.stdin.end(verify ? VERIFY_PROMPT : `${MCP_SYSTEM_PROMPT}\n${mcpPrompt(stageTools[0])}`);
     });
   } catch { return failed('spawn_failed'); }
   finally {
