@@ -1,5 +1,6 @@
+import { lineSplitter } from './stream-lines.mjs';
+import { spawnCommand, killTree } from './platform.mjs';
 import { pathFor, readJSON, writeJSON } from './state.mjs';
-import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { mkdtemp, chmod, rm, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -27,17 +28,17 @@ export async function runMcpCodex(config, stageTools, timeoutMs, { binary = 'cod
       let child;
       const previousMask = process.umask(0o077);
       try {
-        child = spawn(binary, mcpCodexArgs(config, stageTools, directory), {
-          cwd: directory, env: { ...codexEnv(), TMPDIR: directory }, detached: true, stdio: ['pipe', 'pipe', 'ignore'],
+        child = spawnCommand(binary, mcpCodexArgs(config, stageTools, directory), {
+          cwd: directory, env: { ...codexEnv(), TMPDIR: directory }, stdio: ['pipe', 'pipe', 'ignore'],
         });
       } catch { resolve(failed('spawn_failed')); return; }
       finally { process.umask(previousMask); }
       const [claim, submit] = stageTools.map(tool => tool.replace(/^mcp__hmp__/, ''));
       const calls = new Map();
-      let pending = '', bytes = 0, reason, claims = 0, submits = 0, completed = false, usage = {};
+      let bytes = 0, reason, claims = 0, submits = 0, completed = false, usage = {};
       const stop = code => {
         reason ??= code;
-        if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
+        killTree(child.pid);
       };
       const consume = line => {
         if (!line.trim() || reason) return;
@@ -74,18 +75,15 @@ export async function runMcpCodex(config, stageTools, timeoutMs, { binary = 'cod
       child.on('error', () => stop('spawn_failed'));
       child.stdin.on('error', () => {});
       child.stdout.setEncoding('utf8');
+      const split = lineSplitter(value => consume(value), () => Boolean(reason));
       child.stdout.on('data', chunk => {
         bytes += Buffer.byteLength(chunk);
-        if (bytes > 16 * 1024 * 1024) { pending = ''; stop('output_limit'); return; }
+        if (bytes > 16 * 1024 * 1024) { split.clear(); stop('output_limit'); return; }
         if (reason) return;
-        pending += chunk;
-        let end;
-        while (!reason && (end = pending.indexOf('\n')) >= 0) {
-          consume(pending.slice(0, end)); pending = pending.slice(end + 1);
-        }
+        split.write(chunk);
       });
       child.on('close', code => {
-        consume(pending); clearTimeout(timer);
+        consume(split.rest()); clearTimeout(timer);
         process.removeListener('SIGTERM', interrupt); process.removeListener('SIGINT', interrupt);
         reason ??= code !== 0 ? 'exit_failed' : !completed ? 'result_missing' : !verify && claims === 0 ? 'tools_missing' : undefined;
         resolve({ status: reason === 'tools_missing' ? 'stage_unavailable' : reason ? 'failed' : 'ok',

@@ -1,3 +1,4 @@
+import { WINDOWS_ENV } from './platform.mjs';
 import { join } from 'node:path';
 import { pathFor, privateDir } from './state.mjs';
 
@@ -32,7 +33,8 @@ export function codexUsage(event) {
   if (valid(output)) usage.output_tokens = output;
   return usage;
 }
+const WINDOWS_KEYS = () => process.platform === 'win32' ? WINDOWS_ENV : [];
 export function codexEnv() {
-  return Object.fromEntries(['PATH', 'HOME', 'USER', 'LOGNAME', 'CODEX_HOME']
+  return Object.fromEntries([...WINDOWS_KEYS(), 'PATH', 'HOME', 'USER', 'LOGNAME', 'CODEX_HOME']
     .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
 }
