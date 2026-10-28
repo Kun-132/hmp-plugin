@@ -85,3 +85,18 @@ test('Windows passes the launcher the folders it checks, and POSIX passes the sa
     assert.equal('HMP_CLIENT_TOKEN' in claudeEnv('win32'), false);
   } finally { for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]; Object.assign(process.env, saved); }
 });
+
+test('Windows keeps an absolute binary, times out --version with taskkill and sends server instructions by file', async () => {
+  assert.equal(resolveCommand('C:\\tools\\claude.cmd', { platform: 'win32', env: winEnv, exists: p => p === 'C:\\tools\\claude.cmd' }), 'C:\\tools\\claude.cmd');
+  const kills = [];
+  const run = (command, args, options, done) => { kills.push({ command, args, options }); setTimeout(() => done(Object.assign(Error('killed'))), 20); return { pid: 7 }; };
+  const { execCommand } = await import('../plugins/hmp/scripts/platform.mjs');
+  await assert.rejects(execCommand('claude', ['--version'], { env: winEnv, timeout: 1 }, { platform: 'win32', run, exists: p => p === shim }));
+  assert.equal(kills[0].options.timeout, undefined);
+  const { structuredArgs } = await import('../plugins/hmp/scripts/structured-output.mjs');
+  const args = structuredArgs({ type: 'object' }, 'line 1\nA & B', 'C:\\Temp\\hmp-prompt-a\\system-prompt.txt');
+  assert.deepEqual(args.slice(-2), ['--system-prompt-file', 'C:\\Temp\\hmp-prompt-a\\system-prompt.txt']);
+  assert.equal(args.includes('line 1\nA & B'), false);
+  assert.doesNotThrow(() => launchSpec('claude', args, { platform: 'win32', env: winEnv, exists: p => p === shim }));
+  assert.deepEqual(structuredArgs({ type: 'object' }, 'p').slice(-2), ['--system-prompt', 'p']);
+});

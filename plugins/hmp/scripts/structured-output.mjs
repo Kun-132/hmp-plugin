@@ -7,12 +7,12 @@ import { readJSON } from './state.mjs';
 import { claudeEnv } from './worker.mjs';
 import { codexExecArgs, codexUsage, codexEnv, ensureCodexState } from './codex-exec.mjs';
 
-export function structuredArgs(schema, systemPrompt) {
+export function structuredArgs(schema, systemPrompt, promptFile) {
   return ['-p', '--model', 'sonnet', '--tools', '', '--strict-mcp-config', '--setting-sources', '',
     '--settings', JSON.stringify({ disableAllHooks: true, enabledPlugins: {} }), '--no-session-persistence',
     '--output-format', 'json', '--json-schema', JSON.stringify(schema), '--disable-slash-commands', '--no-chrome',
     '--permission-mode', 'dontAsk', '--permission-prompts', 'none',
-    '--system-prompt', systemPrompt];
+    ...(promptFile ? ['--system-prompt-file', promptFile] : ['--system-prompt', systemPrompt])];
 }
 export function matches(value, schema) {
   if (!schema || typeof schema !== 'object') return false;
@@ -27,19 +27,30 @@ export function matches(value, schema) {
     && (schema.type !== 'integer' || Number.isSafeInteger(value)) && value >= (schema.minimum ?? -Infinity) && value <= (schema.maximum ?? Infinity);
   return false;
 }
-export async function runStructuredClaude(directory, contract, input, validate, timeoutMs, { binary = 'claude', systemPrompt } = {}) {
+// A .cmd shim re-expands %* on Windows, so server-written instructions with newlines or & go by file instead.
+export async function runStructuredClaude(directory, contract, input, validate, timeoutMs, { binary = 'claude', systemPrompt, platform = process.platform } = {}) {
+  if (platform !== 'win32') return structuredClaude(directory, contract, input, validate, timeoutMs, binary, systemPrompt, undefined, platform);
+  let promptDirectory;
+  try {
+    promptDirectory = await mkdtemp(join(tmpdir(), 'hmp-prompt-'));
+    await writeFile(join(promptDirectory, 'system-prompt.txt'), systemPrompt ?? '', { mode: 0o600, flag: 'wx' });
+    return await structuredClaude(directory, contract, input, validate, timeoutMs, binary, systemPrompt, join(promptDirectory, 'system-prompt.txt'), platform);
+  } catch { return { code: 'claude_failed' }; }
+  finally { if (promptDirectory) await rm(promptDirectory, { recursive: true, force: true }).catch(() => {}); }
+}
+function structuredClaude(directory, contract, input, validate, timeoutMs, binary, systemPrompt, promptFile, platform) {
   const started = Date.now();
   return new Promise(resolve => {
     let output = '', bytes = 0, failure = null;
     let child;
     try {
-      child = spawnCommand(binary, structuredArgs(contract.output_schema, systemPrompt), {
-        cwd: directory, env: claudeEnv(), stdio: ['pipe', 'pipe', 'ignore'],
-      });
+      child = spawnCommand(binary, structuredArgs(contract.output_schema, systemPrompt, promptFile), {
+        cwd: directory, env: claudeEnv(platform), stdio: ['pipe', 'pipe', 'ignore'],
+      }, { platform });
     } catch { resolve({ code: 'claude_failed' }); return; }
     const stop = code => {
       failure ??= code;
-      killTree(child.pid);
+      killTree(child.pid, { platform });
     };
     const interrupt = () => stop('claude_failed');
     const timer = setTimeout(() => stop('claude_timeout'), Math.max(1, Math.min(90_000, timeoutMs)));

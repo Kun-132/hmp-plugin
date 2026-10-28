@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
-import { lstatSync, realpathSync, statSync } from 'node:fs';
 import { promisify } from 'node:util';
+import { lstatSync, realpathSync, statSync } from 'node:fs';
 import { resolve, sep, win32 } from 'node:path';
 
 // Windows needs these to start cmd.exe and to find the CLI's own config, not just PATH and HOME.
@@ -12,6 +12,7 @@ export function platformEnv(env = process.env, platform = process.platform) {
 const isFile = path => { try { return statSync(path).isFile(); } catch { return false; } };
 export function resolveCommand(name, { platform = process.platform, env = process.env, exists = isFile } = {}) {
   if (platform !== 'win32') return name;
+  if (win32.isAbsolute(name)) return exists(name) ? name : null;
   const exts = (env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
   for (const dir of (env.PATH ?? env.Path ?? '').split(';').filter(Boolean)) {
     for (const ext of win32.extname(name) ? [''] : exts) {
@@ -41,9 +42,18 @@ export function spawnCommand(name, args, options, { platform = process.platform,
   const spec = launchSpec(name, args, { platform, env: options.env ?? process.env, exists });
   return run(spec.command, spec.args, { ...options, ...spec.options, detached: platform !== 'win32' });
 }
-export function execCommand(name, args, options, { platform = process.platform, run = promisify(execFile) } = {}) {
-  const spec = launchSpec(name, args, { platform, env: options.env ?? process.env });
-  return run(spec.command, spec.args, { ...options, ...spec.options });
+// execFile's own timeout would end only cmd.exe on Windows and leave the CLI under it running.
+export function execCommand(name, args, { timeout, ...options }, { platform = process.platform, run = execFile, exists = isFile } = {}) {
+  const spec = launchSpec(name, args, { platform, env: options.env ?? process.env, exists });
+  if (platform !== 'win32') return promisify(run)(spec.command, spec.args, { ...options, timeout });
+  return new Promise((resolvePromise, reject) => {
+    let timer;
+    const child = run(spec.command, spec.args, { ...options, ...spec.options }, (error, stdout, stderr) => {
+      clearTimeout(timer);
+      if (error) reject(error); else resolvePromise({ stdout, stderr });
+    });
+    if (timeout) timer = setTimeout(() => killTree(child.pid, { platform }), timeout);
+  });
 }
 export function killTree(pid, { platform = process.platform, run = execFile, kill = process.kill.bind(process) } = {}) {
   if (!pid) return;
