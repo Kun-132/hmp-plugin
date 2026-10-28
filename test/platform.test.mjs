@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveCommand, launchSpec, spawnCommand, killTree, permissionPath, canonicalDirectory, insideDirectory, platformEnv } from '../plugins/hmp/scripts/platform.mjs';
-import { claudeArgs, createStreamGuard, EXTRACTION_TOOLS } from '../plugins/hmp/scripts/worker.mjs';
+import { claudeEnv, claudeArgs, createStreamGuard, EXTRACTION_TOOLS } from '../plugins/hmp/scripts/worker.mjs';
 
 const winEnv = { PATH: 'C:\\Windows\\system32;"C:\\Users\\synthetic\\.claude-launcher"', PATHEXT: '.COM;.EXE;.BAT;.CMD', COMSPEC: 'C:\\Windows\\system32\\cmd.exe' };
 const shim = 'C:\\Users\\synthetic\\.claude-launcher\\claude.cmd';
@@ -70,4 +70,18 @@ test('Windows read fence uses the POSIX permission form and long names', () => {
   const read = file_path => guard({ type: 'assistant', message: { content: [{ type: 'tool_use', id: file_path, name: 'Read', input: { file_path } }] } });
   assert.doesNotThrow(() => read(directory + '\\claim.json'));
   assert.throws(() => read('C:\\Windows\\win.ini'), /forbidden_read/);
+});
+
+test('Windows passes the launcher the folders it checks, and POSIX passes the same keys as before', () => {
+  const keys = ['TEMP', 'TMP', 'USERPROFILE', 'SYSTEMROOT', 'WINDIR', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'HOMEDRIVE', 'HOMEPATH', 'COMSPEC'];
+  const env = Object.fromEntries([...keys, 'HMP_CLIENT_TOKEN'].map(key => [key, 'C:\\Users\\YOSHIK~1\\' + key]));
+  assert.deepEqual(Object.keys(platformEnv(env, 'win32')).sort(), [...keys].sort());
+  assert.equal(platformEnv(env, 'win32').TEMP, env.TEMP);
+  const saved = { ...process.env };
+  try {
+    Object.assign(process.env, env);
+    assert.ok(keys.every(key => claudeEnv('win32')[key] === env[key]));
+    assert.ok(keys.every(key => !(key in claudeEnv('darwin'))));
+    assert.equal('HMP_CLIENT_TOKEN' in claudeEnv('win32'), false);
+  } finally { for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]; Object.assign(process.env, saved); }
 });

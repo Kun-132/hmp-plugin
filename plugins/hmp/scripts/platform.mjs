@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 import { resolve, sep, win32 } from 'node:path';
 
 // Windows needs these to start cmd.exe and to find the CLI's own config, not just PATH and HOME.
-export const WINDOWS_ENV = Object.freeze(['USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'SYSTEMROOT', 'SYSTEMDRIVE',
+export const WINDOWS_ENV = Object.freeze(['USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'SYSTEMROOT', 'WINDIR', 'SYSTEMDRIVE',
   'COMSPEC', 'PATHEXT', 'HOMEDRIVE', 'HOMEPATH', 'PROGRAMFILES', 'CLAUDE_CODE_GIT_BASH_PATH']);
 export function platformEnv(env = process.env, platform = process.platform) {
   return platform === 'win32' ? Object.fromEntries(WINDOWS_ENV.filter(key => env[key] !== undefined).map(key => [key, env[key]])) : {};
