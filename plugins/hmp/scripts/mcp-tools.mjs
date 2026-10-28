@@ -1,3 +1,4 @@
+import { lineSplitter } from './stream-lines.mjs';
 import { spawnCommand, killTree } from './platform.mjs';
 import { pathFor, readJSON, writeJSON } from './state.mjs';
 import { realpathSync } from 'node:fs';
@@ -34,7 +35,7 @@ export async function runMcpCodex(config, stageTools, timeoutMs, { binary = 'cod
       finally { process.umask(previousMask); }
       const [claim, submit] = stageTools.map(tool => tool.replace(/^mcp__hmp__/, ''));
       const calls = new Map();
-      let pending = '', bytes = 0, reason, claims = 0, submits = 0, completed = false, usage = {};
+      let bytes = 0, reason, claims = 0, submits = 0, completed = false, usage = {};
       const stop = code => {
         reason ??= code;
         killTree(child.pid);
@@ -74,18 +75,15 @@ export async function runMcpCodex(config, stageTools, timeoutMs, { binary = 'cod
       child.on('error', () => stop('spawn_failed'));
       child.stdin.on('error', () => {});
       child.stdout.setEncoding('utf8');
+      const split = lineSplitter(value => consume(value), () => Boolean(reason));
       child.stdout.on('data', chunk => {
         bytes += Buffer.byteLength(chunk);
-        if (bytes > 16 * 1024 * 1024) { pending = ''; stop('output_limit'); return; }
+        if (bytes > 16 * 1024 * 1024) { split.clear(); stop('output_limit'); return; }
         if (reason) return;
-        pending += chunk;
-        let end;
-        while (!reason && (end = pending.indexOf('\n')) >= 0) {
-          consume(pending.slice(0, end)); pending = pending.slice(end + 1);
-        }
+        split.write(chunk);
       });
       child.on('close', code => {
-        consume(pending); clearTimeout(timer);
+        consume(split.rest()); clearTimeout(timer);
         process.removeListener('SIGTERM', interrupt); process.removeListener('SIGINT', interrupt);
         reason ??= code !== 0 ? 'exit_failed' : !completed ? 'result_missing' : !verify && claims === 0 ? 'tools_missing' : undefined;
         resolve({ status: reason === 'tools_missing' ? 'stage_unavailable' : reason ? 'failed' : 'ok',

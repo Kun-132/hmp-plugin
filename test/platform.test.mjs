@@ -100,3 +100,18 @@ test('Windows keeps an absolute binary, times out --version with taskkill and se
   assert.doesNotThrow(() => launchSpec('claude', args, { platform: 'win32', env: winEnv, exists: p => p === shim }));
   assert.deepEqual(structuredArgs({ type: 'object' }, 'p').slice(-2), ['--system-prompt', 'p']);
 });
+
+test('stream lines are split across chunks and a long unterminated line stays linear', async () => {
+  const { lineSplitter } = await import('../plugins/hmp/scripts/stream-lines.mjs');
+  const seen = [];
+  const split = lineSplitter(line => seen.push(line));
+  for (const chunk of ['a', 'b\nc', '\n\nd']) split.write(chunk);
+  assert.deepEqual(seen, ['ab', 'c', '']); assert.equal(split.rest(), 'd'); assert.equal(split.rest(), '');
+  let stopped = false;
+  const halted = lineSplitter(line => { seen.push(line); stopped = true; }, () => stopped);
+  halted.write('x\ny\nz'); assert.deepEqual(seen.slice(3), ['x']); assert.equal(halted.rest(), '');
+  const chunk = 'x'.repeat(65536), started = Date.now(), big = lineSplitter(() => assert.fail('no newline'));
+  for (let i = 0; i < 257; i++) big.write(chunk);
+  assert.equal(big.rest().length, 257 * 65536);
+  assert.ok(Date.now() - started < 1000, 'a linear scan takes a few ms; the old rescan took over 2 s on a busy CI runner');
+});

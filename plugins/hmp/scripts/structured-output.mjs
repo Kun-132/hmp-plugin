@@ -1,3 +1,4 @@
+import { lineSplitter } from './stream-lines.mjs';
 import { spawnCommand, killTree } from './platform.mjs';
 import { realpathSync } from 'node:fs';
 import { mkdtemp, chmod, writeFile, rm, lstat } from 'node:fs/promises';
@@ -107,7 +108,8 @@ export async function runStructuredCodex(contract, input, validate, timeoutMs, {
         });
       } catch { resolve({ code: 'codex_unavailable' }); return; }
       finally { process.umask(previousMask); }
-      let pending = '', bytes = 0, failure = null, usage = {};
+      let bytes = 0, failure = null, usage = {};
+      const split = lineSplitter(value => consume(value));
       const stop = code => {
         failure ??= code;
         killTree(child.pid);
@@ -123,17 +125,14 @@ export async function runStructuredCodex(contract, input, validate, timeoutMs, {
       child.stdout.setEncoding('utf8');
       child.stdout.on('data', chunk => {
         bytes += Buffer.byteLength(chunk);
-        if (bytes > 1024 * 1024) { pending = ''; stop('output_invalid'); return; }
-        pending += chunk;
-        let end;
-        while ((end = pending.indexOf('\n')) >= 0) {
-          consume(pending.slice(0, end)); pending = pending.slice(end + 1);
-        }
+        if (bytes > 1024 * 1024) { split.clear(); stop('output_invalid'); return; }
+        split.write(chunk);
       });
       child.on('close', code => {
         clearTimeout(timer); process.removeListener('SIGTERM', interrupt); process.removeListener('SIGINT', interrupt);
         if (failure || code !== 0) { resolve({ code: failure ?? 'codex_failed' }); return; }
-        if (pending) consume(pending);
+        const rest = split.rest();
+        if (rest) consume(rest);
         resolve({ usage });
       });
       child.stdin.end(input);

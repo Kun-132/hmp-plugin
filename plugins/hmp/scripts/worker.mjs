@@ -1,3 +1,4 @@
+import { lineSplitter } from './stream-lines.mjs';
 import { acquireFileLock, readLock, reclaimLock, ownsFileLock, releaseFileLock } from './locks.mjs';
 import { platformEnv, spawnCommand, execCommand, killTree, permissionPath, canonicalDirectory, insideDirectory } from './platform.mjs';
 import { mkdtemp, rmdir } from 'node:fs/promises';
@@ -134,7 +135,7 @@ export function runClaude(directory, claimTool, timeoutMs, { binary = 'claude', 
   const stageTools = toolsForClaim(claimTool);
   const started = Date.now();
   return new Promise(resolvePromise => {
-    let child, timer, bytes = 0, pending = '', stopped = false, status = 'failed', reason, connected = false, completed = false, lines = false, submits = 0;
+    let child, timer, bytes = 0, stopped = false, status = 'failed', reason, connected = false, completed = false, lines = false, submits = 0;
     const decoder = new StringDecoder('utf8');
     const guard = createStreamGuard(directory, claimTool, { mcpOnly, platform });
     let tools, usage;
@@ -182,6 +183,7 @@ export function runClaude(directory, claimTool, timeoutMs, { binary = 'claude', 
         stop(codes.includes(error.message) ? error.message : 'stream_invalid');
       }
     };
+    const split = lineSplitter(value => line(value), () => stopped);
     const interrupt = () => stop('interrupted');
     try {
       child = spawnCommand(binary, claudeArgs(directory, { verify, claimTool, mcpOnly, toolFree, disallowedTools, discoverTools, platform }),
@@ -196,12 +198,10 @@ export function runClaude(directory, claimTool, timeoutMs, { binary = 'claude', 
     child.stdout.on('data', chunk => {
       bytes += chunk.length;
       if (bytes > 16 * 1024 * 1024) { stop('output_limit'); return; }
-      pending += decoder.write(chunk);
-      let end;
-      while (!stopped && (end = pending.indexOf('\n')) >= 0) { line(pending.slice(0, end)); pending = pending.slice(end + 1); }
+      split.write(decoder.write(chunk));
     });
     child.on('close', code => {
-      line(pending + decoder.end()); clearTimeout(timer);
+      line(split.rest() + decoder.end()); clearTimeout(timer);
       process.removeListener('SIGTERM', interrupt); process.removeListener('SIGINT', interrupt);
       const ok = !stopped && code === 0 && connected && completed;
       resolvePromise({ status: ok ? 'ok' : status,
