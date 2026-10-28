@@ -115,11 +115,11 @@ test('successful point and line MCP stages record only numeric usage under path 
     const saved = await readFile(file, 'utf8'), rows = JSON.parse(saved)[f.url];
     assert.equal(rows.length, 2);
     for (const row of rows) {
-      assert.deepEqual(Object.keys(row).sort(), ['path', 'at', 'duration_ms', ...Object.keys(usage), 'input_total_tokens'].sort());
-      assert.equal(row.path, 'mcp');
-      assert.ok(Object.entries(row).every(([key, value]) => key === 'path' || Number.isSafeInteger(value) && value >= 0));
-      assert.deepEqual({ ...row, path: undefined, at: undefined, duration_ms: undefined },
-        { ...usage, input_total_tokens: 15697, path: undefined, at: undefined, duration_ms: undefined });
+      assert.deepEqual(Object.keys(row).sort(), ['path', 'engine', 'at', 'duration_ms', ...Object.keys(usage), 'input_total_tokens'].sort());
+      assert.equal(row.path, 'mcp'); assert.equal(row.engine, 'claude');
+      assert.ok(Object.entries(row).every(([key, value]) => key === 'path' || key === 'engine' || Number.isSafeInteger(value) && value >= 0));
+      assert.deepEqual({ ...row, path: undefined, engine: undefined, at: undefined, duration_ms: undefined },
+        { ...usage, input_total_tokens: 15697, path: undefined, engine: undefined, at: undefined, duration_ms: undefined });
     }
     assert.equal((await stat(file)).mode & 0o777, 0o600);
     assert.ok(!saved.includes(privateText));

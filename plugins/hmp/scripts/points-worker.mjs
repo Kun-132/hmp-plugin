@@ -12,7 +12,8 @@ import { request, serverSummary } from './client.mjs';
 import { isOffrecord, discardSessionFiles } from './offrecord.mjs';
 import { readyTurns, retryPath, deferTurn, sentencesFor, recordFailure, MCP_FAILURE_CODES } from './turns.mjs';
 import { claudeEnv, ownsWorkerLock, POINT_TOOLS, LINE_TOOLS, supportedVersion } from './worker.mjs';
-import { runMcpClaude } from './mcp-tools.mjs';
+import { codexExecArgs, codexUsage, codexEnv, ensureCodexState } from './codex-exec.mjs';
+import { runMcpClaude, runMcpCodex } from './mcp-tools.mjs';
 import { recordPointsStats, recordMcpStats } from './points-stats.mjs';
 
 export const POINTS_MAXIMUM = Object.freeze({ max_turns_per_day: 300, max_turns_per_run: 10, max_seconds_per_turn: 90 });
@@ -93,30 +94,9 @@ export async function runPointsClaude(directory, contract, sentences, timeoutMs,
   });
 }
 export function pointsCodexArgs(directory) {
-  return ['--no-daemon', '--strict-config', 'exec', '--ignore-user-config', '--ignore-rules', '--ephemeral',
-    '--sandbox', 'read-only', '--skip-git-repo-check', '--cd', directory, '--json',
+  return codexExecArgs(directory, { outputArgs: [
     '--output-last-message', join(directory, 'out.json'), '--output-schema', join(directory, 'output-schema.json'),
-    '-c', 'approval_policy="never"', '-c', 'web_search="disabled"', '-c', 'mcp_servers={}', '-c', 'history.persistence="none"',
-    '-c', `log_dir=${JSON.stringify(join(directory, 'logs'))}`, '-c', `sqlite_home=${JSON.stringify(join(directory, 'state'))}`,
-    '-c', 'analytics.enabled=false', '-c', 'feedback.enabled=false',
-    ...['view_image', 'shell_tool', 'unified_exec', 'shell_snapshot', 'apps', 'plugins', 'remote_plugin', 'hooks',
-      'multi_agent', 'memories', 'goals', 'browser_use', 'computer_use', 'image_generation', 'code_mode',
-      'standalone_web_search'].flatMap(feature => ['--disable', feature]), '-'];
-}
-function codexUsage(event) {
-  const valid = n => Number.isSafeInteger(n) && n >= 0;
-  if (event?.type !== 'turn.completed') return {};
-  const { input_tokens: input, cached_input_tokens: cached, output_tokens: output } = event.usage ?? {};
-  const usage = {};
-  if (valid(input)) {
-    usage.input_total_tokens = input;
-    if (valid(cached) && cached <= input) {
-      usage.input_tokens = input - cached;
-      usage.cache_read_input_tokens = cached;
-    }
-  }
-  if (valid(output)) usage.output_tokens = output;
-  return usage;
+  ] });
 }
 export async function runPointsCodex(contract, sentences, timeoutMs, { binary = 'codex', tempRoot = tmpdir() } = {}) {
   const started = Date.now();
@@ -125,11 +105,11 @@ export async function runPointsCodex(contract, sentences, timeoutMs, { binary = 
     directory = await mkdtemp(join(tempRoot, 'hmp-points-codex-'));
     directory = realpathSync(directory);
     await chmod(directory, 0o700);
+    await ensureCodexState();
     await writeFile(join(directory, 'output-schema.json'), JSON.stringify(contract.output_schema), { mode: 0o600, flag: 'wx' });
     await writeFile(join(directory, 'out.json'), '', { mode: 0o600, flag: 'wx' });
     const result = await new Promise(resolve => {
-      const env = Object.fromEntries(['PATH', 'HOME', 'USER', 'LOGNAME', 'CODEX_HOME']
-        .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
+      const env = codexEnv();
       let child;
       const previousMask = process.umask(0o077);
       try {
@@ -218,6 +198,7 @@ export async function runPointsWorker(config, summary, { remaining = Infinity } 
   const outcome = { remaining: 0 };
   const attempted = new Set();
   const stages = [POINT_TOOLS, LINE_TOOLS].map(tools => ({ tools, stopped: false }));
+  const engine = config.engine ?? 'claude';
   let mcpReady = false;
   const allowed = async session => {
     if (session && await isOffrecord(session)) {
@@ -260,7 +241,6 @@ export async function runPointsWorker(config, summary, { remaining = Infinity } 
         if (!await allowed(turn.session)) return outcome;
         if (!await reserve()) break;
         const sentences = sentencesFor(turn);
-        const engine = config.engine ?? 'claude';
         const result = engine === 'codex'
           ? await runPointsCodex(contract, sentences, limits.max_seconds_per_turn * 1000)
           : await runPointsClaude(directory, contract, sentences, limits.max_seconds_per_turn * 1000);
@@ -295,12 +275,17 @@ export async function runPointsWorker(config, summary, { remaining = Infinity } 
       let progressed = false;
       try {
         if (!mcpReady) {
-          try { validateMcp(await readJSON(pathFor('mcp.json')), config); }
-          catch { await recordFailure(config, 'mcp_config_invalid'); return outcome; }
-          let version;
-          try { version = await promisify(execFile)('claude', ['--version'], { env: claudeEnv(), timeout: 1500, maxBuffer: 1024 }); }
-          catch { await recordFailure(config, 'mcp_version_failed'); return outcome; }
-          if (!supportedVersion(version.stdout)) { await recordFailure(config, 'mcp_version_unsupported'); return outcome; }
+          if (engine === 'codex') {
+            try { await promisify(execFile)('codex', ['--version'], { env: codexEnv(), timeout: 1500, maxBuffer: 1024 }); }
+            catch { await recordFailure(config, 'mcp_version_failed'); return outcome; }
+          } else {
+            try { validateMcp(await readJSON(pathFor('mcp.json')), config); }
+            catch { await recordFailure(config, 'mcp_config_invalid'); return outcome; }
+            let version;
+            try { version = await promisify(execFile)('claude', ['--version'], { env: claudeEnv(), timeout: 1500, maxBuffer: 1024 }); }
+            catch { await recordFailure(config, 'mcp_version_failed'); return outcome; }
+            if (!supportedVersion(version.stdout)) { await recordFailure(config, 'mcp_version_unsupported'); return outcome; }
+          }
           mcpReady = true;
         }
         for (const stage of stages) {
@@ -310,7 +295,9 @@ export async function runPointsWorker(config, summary, { remaining = Infinity } 
             if (!await allowed()) return outcome;
             if (!await reserve()) return outcome;
             progressed = true;
-            const result = await runMcpClaude(config, directory, stage.tools, limits.max_seconds_per_turn * 1000);
+            const result = engine === 'codex'
+              ? await runMcpCodex(config, stage.tools, limits.max_seconds_per_turn * 1000)
+              : await runMcpClaude(config, directory, stage.tools, limits.max_seconds_per_turn * 1000);
             if (result.status === 'ok') await recordMcpStats(config, result.usage).catch(() => {});
             if (result.status !== 'ok') {
               const code = 'mcp_' + result.reason;
